@@ -9,7 +9,7 @@ const (
 	TypeFull  Type = "full"
 )
 
-func (t Type) Size() (w int16, h int16) {
+func (t Type) size() (w int, h int) {
 	switch t {
 	case TypeEyes:
 		return 16, 16

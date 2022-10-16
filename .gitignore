@@ -2,3 +2,4 @@
 .vscode/
 *.elf
 internal/media/media/full/*.png
+internal/media/media/full/*.bmp

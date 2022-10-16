@@ -3,41 +3,45 @@ package media
 import (
 	"embed"
 	"errors"
-	"tinygo.org/x/drivers/image/png"
+	"image"
+
+	"golang.org/x/image/bmp"
 )
 
-//go:embed media/*/*.png
+//go:embed media/*/*.bmp
 var imgs embed.FS
 
 // LoadImage loads the specified image of the specified type.
-//
-// NOTE: img is returned indexed by rows then columns (y, then x).
-func LoadImage(typ Type, name string) (w, h int16, img [][]RGB565, err error) {
-	r, err := imgs.Open("media/" + string(typ) + "/" + name + ".png")
+func LoadImage(typ Type, name string) (image.Image, error) {
+	r, err := imgs.Open("media/" + string(typ) + "/" + name + ".bmp")
 	if err != nil {
-		return 0, 0, nil, err
-	}
-	fi, err := r.Stat()
-	if err != nil {
-		return 0, 0, nil, err
-	}
-	if fi.IsDir() {
-		return 0, 0, nil, errors.New("cannot open directory")
-	}
-	w, h = typ.Size()
-	if w == 0 || h == 0 {
-		return 0, 0, nil, errors.New("invalid media type")
+		return nil, err
 	}
 
-	img = make([][]RGB565, h)
-	buf := make([]uint16, w)
-	png.SetCallback(buf, func(data []uint16, x, y, w, h, width, height int16) {
-		// TODO data validation
-		img[y] = make([]RGB565, w)
-		for i, d := range data {
-			img[y][i] = RGB565(d)
-		}
-	})
-	_, err = png.Decode(r)
-	return w, h, img, err
+	fi, err := r.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	if fi.IsDir() {
+		return nil, errors.New("cannot open directory")
+	}
+
+	w, h := typ.size()
+	if w == 0 || h == 0 {
+		return nil, errors.New("invalid media type")
+	}
+
+	img, err := bmp.Decode(r)
+	if err != nil {
+		return nil, err
+	}
+
+	b := img.Bounds()
+	iw, ih := b.Max.X-b.Min.X, b.Max.Y-b.Min.Y
+	if w != iw || h != ih {
+		return nil, errors.New("invalid image size for type " + string(typ))
+	}
+
+	return img, nil
 }
