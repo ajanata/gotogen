@@ -6,7 +6,7 @@ go 1.19
 replace tinygo.org/x/drivers => github.com/ajanata/tinygo-drivers v0.0.0-20221010064956-016cdce8a129
 
 require (
-	github.com/ajanata/textbuf v0.0.1
+	github.com/ajanata/textbuf v0.0.2
 	tinygo.org/x/drivers v0.23.0
 )
 
