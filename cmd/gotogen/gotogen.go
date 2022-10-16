@@ -2,7 +2,6 @@ package main
 
 import (
 	"machine"
-	"runtime"
 	"time"
 	"tinygo.org/x/drivers"
 
@@ -12,20 +11,20 @@ import (
 )
 
 func main() {
-	runtime.AdjustTimeOffset(int64(1665706022 * time.Second))
-
-	machine.LED.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	blink()
-
 	machine.I2C0.Configure(machine.I2CConfig{
-		SCL: machine.I2C1_SCL_PIN,
-		SDA: machine.I2C1_SDA_PIN,
+		SCL:       machine.I2C1_SCL_PIN,
+		SDA:       machine.I2C1_SDA_PIN,
+		Frequency: 2 * machine.MHz,
 	})
+	blink()
 
 	dev := ssd1306.NewI2C(machine.I2C0)
 	dev.Configure(ssd1306.Config{Width: 128, Height: 64, Address: 0x3D, VccState: ssd1306.SWITCHCAPVCC})
+	blink()
 	dev.ClearBuffer()
 	dev.ClearDisplay()
+	blink()
 
 	g, err := gotogen.New(60, nil, &dev, machine.LED, func() (faceDisplay drivers.Displayer, menuInput gotogen.MenuInput, boopSensor gotogen.BoopSensor, err error) {
 		return nil, nil, nil, nil
@@ -44,10 +43,12 @@ func main() {
 }
 
 func blink() {
-	machine.LED.High()
-	time.Sleep(500 * time.Millisecond)
-	machine.LED.Low()
-	time.Sleep(500 * time.Millisecond)
+	led := machine.LED
+	led.Configure(machine.PinConfig{Mode: machine.PinOutput})
+	led.High()
+	time.Sleep(100 * time.Millisecond)
+	led.Low()
+	time.Sleep(100 * time.Millisecond)
 }
 
 func earlyPanic() {
