@@ -1,3 +1,4 @@
 .idea/
 .vscode/
 *.elf
+internal/media/media/full/*.png
