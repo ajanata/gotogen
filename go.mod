@@ -2,7 +2,13 @@ module github.com/ajanata/gotogen
 
 go 1.19
 
-// fixes compile error for apds9960
+// these replace directives make my development life easier. go.work wasn't working for me.
+replace (
+	github.com/ajanata/textbuf => ../textbuf
+	github.com/ajanata/oled_font => ../oled_font
+)
+
+// fixes compile error for apds9960. you will need to leave this one here!
 replace tinygo.org/x/drivers => github.com/ajanata/tinygo-drivers v0.0.0-20221010064956-016cdce8a129
 
 require (

@@ -13,8 +13,8 @@ import (
 func main() {
 	blink()
 	machine.I2C0.Configure(machine.I2CConfig{
-		SCL:       machine.I2C1_SCL_PIN,
-		SDA:       machine.I2C1_SDA_PIN,
+		SCL:       machine.I2C0_SCL_PIN,
+		SDA:       machine.I2C0_SDA_PIN,
 		Frequency: 2 * machine.MHz,
 	})
 	blink()
