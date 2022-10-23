@@ -4,6 +4,7 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"machine"
 	"runtime"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 type Gotogen struct {
 	framerate   uint
+	frameTime   time.Duration
 	faceDisplay drivers.Displayer
 	boopSensor  BoopSensor
 	status      Blinker
@@ -83,6 +85,7 @@ func New(framerate uint, log Logger, menu drivers.Displayer, status Blinker, ini
 
 	return &Gotogen{
 		framerate:   framerate,
+		frameTime:   time.Second / time.Duration(framerate),
 		menuDisplay: menu,
 		status:      status,
 		log:         log,
@@ -182,20 +185,22 @@ func (g *Gotogen) Run() {
 	if err != nil {
 		g.panic(err)
 	}
+	machine.BUTTON_UP.Configure(machine.PinConfig{Mode: machine.PinInputPullup})
+	moveImg = true
 
-	// I'd rather range time.Tick but that seems to be less performant
-	for {
+	for range time.Tick(g.frameTime) {
 		err := g.RunTick()
 		if err != nil {
 			g.panic(err)
 		}
-		time.Sleep(time.Second / time.Duration(g.framerate))
 	}
 }
 
 var imgX int16
 
 var cant image.Image
+var lastButton bool
+var moveImg bool
 
 // RunTick runs a single iteration of the main loop.
 func (g *Gotogen) RunTick() error {
@@ -212,19 +217,28 @@ func (g *Gotogen) RunTick() error {
 		g.menuText.SetLine(7, time.Now().Format(time.Stamp))
 	}
 
-	b := cant.Bounds()
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
-			r, gr, b, a := cant.At(x, y).RGBA()
-			g.faceDisplay.SetPixel((128-int16(x)+imgX)%128, int16(31-y), color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
+	if b := machine.BUTTON_UP.Get(); b != lastButton {
+		lastButton = b
+		if !b {
+			moveImg = !moveImg
 		}
 	}
-	for y := int16(0); y < 31; y++ {
-		g.faceDisplay.SetPixel((128-64+imgX)%128, y, color.RGBA{})
-	}
-	imgX++
-	if imgX == 128 {
-		imgX = 0
+
+	if moveImg {
+		b := cant.Bounds()
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				r, gr, b, a := cant.At(x, y).RGBA()
+				g.faceDisplay.SetPixel((128-int16(x)+imgX)%128, int16(31-y), color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
+			}
+		}
+		for y := int16(0); y < 31; y++ {
+			g.faceDisplay.SetPixel((128-64+imgX)%128, y, color.RGBA{})
+		}
+		imgX++
+		if imgX == 128 {
+			imgX = 0
+		}
 	}
 
 	// if g.tick%2 == 0 {

@@ -4,8 +4,8 @@ go 1.19
 
 // these replace directives make my development life easier. go.work wasn't working for me.
 replace (
-	github.com/ajanata/textbuf => ../textbuf
 	github.com/ajanata/oled_font => ../oled_font
+	github.com/ajanata/textbuf => ../textbuf
 )
 
 // fixes compile error for apds9960. you will need to leave this one here!

@@ -1,7 +1,3 @@
-github.com/ajanata/oled_font v1.2.0 h1:v7eMZ85qTZOcc7tzm5uHJMekZN0K12okwz7nc5j0CGE=
-github.com/ajanata/oled_font v1.2.0/go.mod h1:n6gYqd0ph+soDNitgGucYMQomt87OgF905cMbDBQnQ8=
-github.com/ajanata/textbuf v0.0.2 h1:7vcGbjICuJhGaqX4LgpHrVN3eXcLBcuJNYVAiFM491I=
-github.com/ajanata/textbuf v0.0.2/go.mod h1:QTeh3yoerzyND/bZZ6AzbvWkLdQig2jC0GDth2m3Djc=
 github.com/ajanata/tinygo-drivers v0.0.0-20221010064956-016cdce8a129 h1:MpBSd4+S7gyKKH80g/LV1yY8KpCmj+dW/MSoutbel/8=
 github.com/ajanata/tinygo-drivers v0.0.0-20221010064956-016cdce8a129/go.mod h1:J4+51Li1kcfL5F93kmnDWEEzQF3bLGz0Am3Q7E2a8/E=
 github.com/bgould/http v0.0.0-20190627042742-d268792bdee7/go.mod h1:BTqvVegvwifopl4KTEDth6Zezs9eR+lCWhvGKvkxJHE=
