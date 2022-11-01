@@ -5,7 +5,6 @@ import (
 	"image"
 	"image/color"
 	"machine"
-	"runtime"
 	"time"
 
 	"github.com/ajanata/textbuf"
@@ -123,12 +122,12 @@ func (g *Gotogen) Init() error {
 
 	faceDisplay, menuInput, boopSensor, err := g.initter()
 	if err != nil {
-		g.menuText.PrintlnInverse(err.Error())
+		_ = g.menuText.PrintlnInverse(err.Error())
 		return errors.New("initter: " + err.Error())
 	}
-	// if faceDisplay == nil {
-	// 	return errors.New("initter did not provide face")
-	// }
+	if faceDisplay == nil {
+		return errors.New("initter did not provide face")
+	}
 	// if menuInput == nil {
 	// 	return errors.New("initter did not provide menu input")
 	// }
@@ -142,40 +141,10 @@ func (g *Gotogen) Init() error {
 	_ = g.menuText.Println(time.Now().Format(time.Stamp))
 	_ = g.menuText.Println("Gotogen online.")
 
-	if faceDisplay != nil {
-		faceW, faceH := faceDisplay.Size()
-		g.log.Debugf("face size = %d x %d", faceW, faceH)
-
-		cant, err := media.LoadImage(media.TypeFull, "Elbrarmemestickerscant")
-		if err != nil {
-			return err
-		}
-		b := cant.Bounds()
-		for y := b.Min.Y; y < b.Max.Y; y++ {
-			for x := b.Min.X; x < b.Max.X; x++ {
-				r, g, b, a := cant.At(x, y).RGBA()
-				faceDisplay.SetPixel(int16(x), int16(y), color.RGBA{uint8(r), uint8(g), uint8(b), uint8(a)})
-				faceDisplay.SetPixel(int16(x+64), int16(31-y), color.RGBA{uint8(r), uint8(g), uint8(b), uint8(a)})
-			}
-		}
-
-		go g.faceDisplayLoop()
-	}
-
 	g.blink()
 	g.init = true
 	g.log.Info("init complete")
 	return nil
-}
-
-func (g *Gotogen) faceDisplayLoop() {
-	for {
-		err := g.faceDisplay.Display()
-		if err != nil {
-			g.panic(err)
-		}
-		runtime.Gosched()
-	}
 }
 
 // Run does not return. It attempts to run the main loop at the framerate specified in New.
@@ -207,13 +176,13 @@ func (g *Gotogen) RunTick() error {
 	if !g.init {
 		return errors.New("not initialized")
 	}
-	println("tick")
 
 	start := time.Now()
 	g.statusOn()
 	g.tick++
 
 	if g.tick%uint32(g.framerate) == 0 {
+		// TODO
 		g.menuText.SetLine(7, time.Now().Format(time.Stamp))
 	}
 
@@ -269,6 +238,10 @@ func (g *Gotogen) RunTick() error {
 	// 	}
 	// }
 
+	err := g.faceDisplay.Display()
+	if err != nil {
+		g.panic(err)
+	}
 	g.statusOff()
 	frameTime := time.Now().Sub(start)
 	g.log.Debugf("frame time %s", frameTime.String())
@@ -280,9 +253,6 @@ func (g *Gotogen) RunTick() error {
 func (g *Gotogen) panic(v any) {
 	println(v)
 	g.log.Infof("%v", v)
-	if g.status == nil {
-		panic(v)
-	}
 	for {
 		println(v)
 		g.blink()
