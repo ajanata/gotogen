@@ -5,36 +5,52 @@ import (
 	"image"
 	"image/color"
 	"machine"
+	"strconv"
 	"time"
 
 	"github.com/ajanata/textbuf"
 	"tinygo.org/x/drivers"
 
 	"github.com/ajanata/gotogen/internal/media"
+	"github.com/ajanata/gotogen/internal/mirror"
 )
 
 type Gotogen struct {
 	framerate   uint
 	frameTime   time.Duration
 	faceDisplay drivers.Displayer
+	faceMirror  drivers.Displayer
 	boopSensor  BoopSensor
 	status      Blinker
 
 	menuDisplay drivers.Displayer
+	menuMirror  drivers.Displayer
 	menuInput   MenuInput
 	menuText    *textbuf.Buffer // TODO interface
+	driver      Driver
+	log         Logger
 
-	initter Initter
-	log     Logger
+	init  bool
+	start time.Time
 
-	tick uint32
-	init bool
+	tick      uint32
+	lastSec   time.Time
+	lastTicks uint32
 }
 
-// Initter is a function to initialize secondary devices after the primary menu display has been initialized for boot
-// messages. Hardware drivers shall configure any buses (SPI, etc.) that are required to communicate with these devices
-// at this point, and should only configure the bare minimum to call New.
-type Initter func() (faceDisplay drivers.Displayer, menuInput MenuInput, boopSensor BoopSensor, err error)
+type Driver interface {
+	// EarlyInit initializes secondary devices after the primary menu display has been initialized for boot
+	// messages. Hardware drivers shall configure any buses (SPI, etc.) that are required to communicate with these
+	// devices at this point, and should only configure the bare minimum to call New.
+	EarlyInit() (faceDisplay drivers.Displayer, menuInput MenuInput, boopSensor BoopSensor, err error)
+
+	// LateInit performs any late initialization (e.g. connecting to wifi to set the clock). The failure of anything in
+	// LateInit should not cause the failure of the entire process; returning an error is to simplify logging. Boot
+	// messages may be freely logged.
+	//
+	// TODO interface
+	LateInit(buffer *textbuf.Buffer) error
+}
 
 type Blinker interface {
 	Low()
@@ -68,7 +84,7 @@ type MenuInput interface {
 	PressedButton() MenuButton
 }
 
-func New(framerate uint, log Logger, menu drivers.Displayer, status Blinker, initter Initter) (*Gotogen, error) {
+func New(framerate uint, log Logger, menu drivers.Displayer, status Blinker, driver Driver) (*Gotogen, error) {
 	if framerate == 0 {
 		return nil, errors.New("must run at least one frame per second")
 	}
@@ -78,17 +94,19 @@ func New(framerate uint, log Logger, menu drivers.Displayer, status Blinker, ini
 	if menu == nil {
 		return nil, errors.New("must provide menu display")
 	}
-	if initter == nil {
-		return nil, errors.New("must provide initter")
+	if driver == nil {
+		return nil, errors.New("must provide driver")
 	}
 
 	return &Gotogen{
 		framerate:   framerate,
 		frameTime:   time.Second / time.Duration(framerate),
 		menuDisplay: menu,
+		menuMirror:  mirror.New(menu),
 		status:      status,
 		log:         log,
-		initter:     initter,
+		driver:      driver,
+		start:       time.Now(),
 	}, nil
 }
 
@@ -120,25 +138,42 @@ func (g *Gotogen) Init() error {
 	// we already know it was possible to print text so don't bother checking every time
 	_ = g.menuText.Print("Initialize devices")
 
-	faceDisplay, menuInput, boopSensor, err := g.initter()
+	faceDisplay, menuInput, boopSensor, err := g.driver.EarlyInit()
 	if err != nil {
 		_ = g.menuText.PrintlnInverse(err.Error())
-		return errors.New("initter: " + err.Error())
+		return errors.New("early init: " + err.Error())
 	}
 	if faceDisplay == nil {
-		return errors.New("initter did not provide face")
+		return errors.New("init did not provide face")
 	}
 	// if menuInput == nil {
-	// 	return errors.New("initter did not provide menu input")
+	// 	return errors.New("init did not provide menu input")
 	// }
 
 	g.faceDisplay = faceDisplay
+	g.faceMirror = mirror.New(faceDisplay)
 	g.menuInput = menuInput
 	g.boopSensor = boopSensor
-	g.initter = nil
 	_ = g.menuText.Println(".")
+
+	// now that we have the face panels set up, we can boot a loading image on them while LateInit runs
+	busy, err := media.LoadImage(media.TypeFull, "wait")
+	if err != nil {
+		_ = g.menuText.PrintlnInverse("load busy: " + err.Error())
+		return errors.New("load busy: " + err.Error())
+	}
+	g.SetFullFace(busy, 0, 0)
+	_ = g.faceDisplay.Display()
+
+	err = g.driver.LateInit(g.menuText)
+	if err != nil {
+		_ = g.menuText.PrintlnInverse("late init: " + err.Error())
+		// LateInit is not allowed to cause the boot to fail
+	}
+
 	_ = g.menuText.Println("The time is now")
 	_ = g.menuText.Println(time.Now().Format(time.Stamp))
+	_ = g.menuText.Println("Booted in " + time.Now().Sub(g.start).Round(100*time.Millisecond).String())
 	_ = g.menuText.Println("Gotogen online.")
 
 	g.blink()
@@ -178,12 +213,14 @@ func (g *Gotogen) RunTick() error {
 	}
 
 	start := time.Now()
-	g.statusOn()
+	g.statusOff()
 	g.tick++
 
-	if g.tick%uint32(g.framerate) == 0 {
-		// TODO
-		g.menuText.SetLine(7, time.Now().Format(time.Stamp))
+	if time.Since(g.lastSec) >= time.Second {
+		// TODO something better
+		_ = g.menuText.SetLine(7, time.Now().Format("03:04:05PM")+" "+strconv.Itoa(int(g.tick-g.lastTicks))+"fps")
+		g.lastSec = time.Now()
+		g.lastTicks = g.tick
 	}
 
 	if b := machine.BUTTON_UP.Get(); b != lastButton {
@@ -194,20 +231,12 @@ func (g *Gotogen) RunTick() error {
 	}
 
 	if moveImg {
-		b := cant.Bounds()
-		for y := b.Min.Y; y < b.Max.Y; y++ {
-			for x := b.Min.X; x < b.Max.X; x++ {
-				r, gr, b, a := cant.At(x, y).RGBA()
-				g.faceDisplay.SetPixel((128-int16(x)+imgX)%128, int16(31-y), color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
-			}
-		}
-		for y := int16(0); y < 31; y++ {
-			g.faceDisplay.SetPixel((128-64+imgX)%128, y, color.RGBA{})
-		}
+		g.SetFullFace(cant, imgX, 0)
 		imgX++
-		if imgX == 128 {
+		if imgX == 64 {
 			imgX = 0
 		}
+		g.menuDisplay.Display()
 	}
 
 	// if g.tick%2 == 0 {
@@ -242,7 +271,7 @@ func (g *Gotogen) RunTick() error {
 	if err != nil {
 		g.panic(err)
 	}
-	g.statusOff()
+	g.statusOn()
 	frameTime := time.Now().Sub(start)
 	g.log.Debugf("frame time %s", frameTime.String())
 	return nil
@@ -275,5 +304,23 @@ func (g *Gotogen) statusOn() {
 func (g *Gotogen) statusOff() {
 	if g.status != nil {
 		g.status.Low()
+	}
+}
+
+func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16) {
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, gr, b, a := img.At(x, y).RGBA()
+			// FIXME remove hardcoded dimensions and origin flip
+			g.faceMirror.SetPixel((64-int16(x)+offX)%64, (int16(31-y)+offY)%32, color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
+			// RGBA returns each channel |= itself << 8 for whatever reason
+			r &= 0xFF
+			if r < 0xA0 {
+				r = 0
+			}
+			// FIXME remove hardcoded dimensions
+			g.menuMirror.SetPixel((64-int16(x)+offX)%64, (int16(y)+offY)%32, color.RGBA{uint8(r), 0, 0, 1})
+		}
 	}
 }
