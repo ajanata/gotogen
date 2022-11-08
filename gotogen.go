@@ -4,7 +4,6 @@ import (
 	"errors"
 	"image"
 	"image/color"
-	"machine"
 	"strconv"
 	"time"
 
@@ -25,7 +24,6 @@ type Gotogen struct {
 
 	menuDisplay drivers.Displayer
 	menuMirror  drivers.Displayer
-	menuInput   MenuInput
 	menuText    *textbuf.Buffer // TODO interface
 	driver      Driver
 	log         Logger
@@ -42,7 +40,7 @@ type Driver interface {
 	// EarlyInit initializes secondary devices after the primary menu display has been initialized for boot
 	// messages. Hardware drivers shall configure any buses (SPI, etc.) that are required to communicate with these
 	// devices at this point, and should only configure the bare minimum to call New.
-	EarlyInit() (faceDisplay drivers.Displayer, menuInput MenuInput, boopSensor BoopSensor, err error)
+	EarlyInit() (faceDisplay drivers.Displayer, boopSensor BoopSensor, err error)
 
 	// LateInit performs any late initialization (e.g. connecting to wifi to set the clock). The failure of anything in
 	// LateInit should not cause the failure of the entire process; returning an error is to simplify logging. Boot
@@ -50,6 +48,14 @@ type Driver interface {
 	//
 	// TODO interface
 	LateInit(buffer *textbuf.Buffer) error
+
+	// PressedButton returns the currently-pressed menu button. The implementation is responsible for prioritizing
+	// multiple buttons being pressed at the same time however it sees fit (or implement some buttons as a chord of
+	// multiple physical buttons), as well as handling debouncing (if needed) and button repeating. Basically, this
+	// should only return a value when that value should be acted upon.
+	//
+	// This function should expect to be called at the main loop framerate.
+	PressedButton() MenuButton
 }
 
 type Blinker interface {
@@ -71,17 +77,28 @@ const (
 	MenuButtonBack
 	MenuButtonUp
 	MenuButtonDown
-	// MenuButtonReset is for resetting a specific setting to its default value, and must be held for at least 1 second.
-	MenuButtonReset
+	// MenuButtonDefault is for resetting a specific setting to its default value. Drivers may wish to require this
+	// button to be held down for a second before triggering it, or perhaps make it be a chord of up and down.
+	MenuButtonDefault
 )
 
-type MenuInput interface {
-	// PressedButton returns the currently-pressed menu button. The implementation is responsible for prioritizing
-	// multiple buttons being pressed at the same time however it sees fit (or implement some buttons as a chord of
-	// multiple physical buttons), as well as handling debouncing (if needed).
-	//
-	// This function should expect to be called at the main loop framerate.
-	PressedButton() MenuButton
+func (b MenuButton) String() string {
+	switch b {
+	case MenuButtonNone:
+		return "none"
+	case MenuButtonMenu:
+		return "menu"
+	case MenuButtonBack:
+		return "back"
+	case MenuButtonUp:
+		return "up"
+	case MenuButtonDown:
+		return "down"
+	case MenuButtonDefault:
+		return "default"
+	default:
+		return "INVALID"
+	}
 }
 
 func New(framerate uint, log Logger, menu drivers.Displayer, status Blinker, driver Driver) (*Gotogen, error) {
@@ -138,7 +155,7 @@ func (g *Gotogen) Init() error {
 	// we already know it was possible to print text so don't bother checking every time
 	_ = g.menuText.Print("Initialize devices")
 
-	faceDisplay, menuInput, boopSensor, err := g.driver.EarlyInit()
+	faceDisplay, boopSensor, err := g.driver.EarlyInit()
 	if err != nil {
 		_ = g.menuText.PrintlnInverse(err.Error())
 		return errors.New("early init: " + err.Error())
@@ -152,7 +169,6 @@ func (g *Gotogen) Init() error {
 
 	g.faceDisplay = faceDisplay
 	g.faceMirror = mirror.New(faceDisplay)
-	g.menuInput = menuInput
 	g.boopSensor = boopSensor
 	_ = g.menuText.Println(".")
 
@@ -189,7 +205,6 @@ func (g *Gotogen) Run() {
 	if err != nil {
 		g.panic(err)
 	}
-	machine.BUTTON_UP.Configure(machine.PinConfig{Mode: machine.PinInputPullup})
 	moveImg = true
 
 	for range time.Tick(g.frameTime) {
@@ -203,7 +218,6 @@ func (g *Gotogen) Run() {
 var imgX int16
 
 var cant image.Image
-var lastButton bool
 var moveImg bool
 
 // RunTick runs a single iteration of the main loop.
@@ -223,11 +237,9 @@ func (g *Gotogen) RunTick() error {
 		g.lastTicks = g.tick
 	}
 
-	if b := machine.BUTTON_UP.Get(); b != lastButton {
-		lastButton = b
-		if !b {
-			moveImg = !moveImg
-		}
+	but := g.driver.PressedButton()
+	if but != MenuButtonNone {
+		_ = g.menuText.SetLine(6, "button: "+but.String())
 	}
 
 	if moveImg {
@@ -236,36 +248,9 @@ func (g *Gotogen) RunTick() error {
 		if imgX == 64 {
 			imgX = 0
 		}
+		// temp hack if mirroring
 		g.menuDisplay.Display()
 	}
-
-	// if g.tick%2 == 0 {
-	// 	cant, err := media.LoadImage(media.TypeFull, "Elbrarmemestickerscant")
-	// 	if err != nil {
-	// 		return err
-	// 	}
-	// 	b := cant.Bounds()
-	// 	for y := b.Min.Y; y < b.Max.Y; y++ {
-	// 		for x := b.Min.X; x < b.Max.X; x++ {
-	// 			r, gr, b, a := cant.At(x, y).RGBA()
-	// 			g.faceDisplay.SetPixel(int16(x), int16(y), color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
-	// 			g.faceDisplay.SetPixel(int16(x+64), int16(31-y), color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
-	// 		}
-	// 	}
-	// } else {
-	// 	eyes, err := media.LoadImage(media.TypeFull, "Elbrarstickerswatching")
-	// 	if err != nil {
-	// 		return err
-	// 	}
-	// 	b := eyes.Bounds()
-	// 	for y := b.Min.Y; y < b.Max.Y; y++ {
-	// 		for x := b.Min.X; x < b.Max.X; x++ {
-	// 			r, gr, b, a := eyes.At(x, y).RGBA()
-	// 			g.faceDisplay.SetPixel(int16(x), int16(y), color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
-	// 			g.faceDisplay.SetPixel(int16(x+64), int16(31-y), color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
-	// 		}
-	// 	}
-	// }
 
 	err := g.faceDisplay.Display()
 	if err != nil {
@@ -309,18 +294,22 @@ func (g *Gotogen) statusOff() {
 
 func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16) {
 	b := img.Bounds()
-	for y := b.Min.Y; y < b.Max.Y; y++ {
-		for x := b.Min.X; x < b.Max.X; x++ {
+	for x := b.Min.X; x < b.Max.X; x++ {
+		xx := (64 - int16(x) + offX) % 64
+		for y := b.Min.Y; y < b.Max.Y; y++ {
 			r, gr, b, a := img.At(x, y).RGBA()
 			// FIXME remove hardcoded dimensions and origin flip
-			g.faceMirror.SetPixel((64-int16(x)+offX)%64, (int16(31-y)+offY)%32, color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
-			// RGBA returns each channel |= itself << 8 for whatever reason
-			r &= 0xFF
-			if r < 0xA0 {
-				r = 0
-			}
-			// FIXME remove hardcoded dimensions
-			g.menuMirror.SetPixel((64-int16(x)+offX)%64, (int16(y)+offY)%32, color.RGBA{uint8(r), 0, 0, 1})
+			g.faceMirror.SetPixel(xx, (int16(y)+offY)%32, color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
+			// g.faceMirror.SetPixel(xx, (int16(31-y)+offY)%32, color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
+
+			// mirror to menu
+			// // RGBA returns each channel |= itself << 8 for whatever reason
+			// r &= 0xFF
+			// if r < 0xA0 {
+			// 	r = 0
+			// }
+			// // FIXME remove hardcoded dimensions
+			// g.menuMirror.SetPixel(xx, (int16(y)+offY)%32, color.RGBA{uint8(r), 0, 0, 1})
 		}
 	}
 }
