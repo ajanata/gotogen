@@ -4,6 +4,7 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -140,6 +141,7 @@ func (g *Gotogen) Init() error {
 	if err != nil {
 		return errors.New("init menu: " + err.Error())
 	}
+	g.menuText.AutoFlush = true
 
 	w, h := g.menuText.Size()
 	if w < 15 || h < 4 {
@@ -181,6 +183,11 @@ func (g *Gotogen) Init() error {
 	g.SetFullFace(busy, 0, 0)
 	_ = g.faceDisplay.Display()
 
+	_ = g.menuText.Println("CPUs: " + strconv.Itoa(runtime.NumCPU()))
+	mem := runtime.MemStats{}
+	runtime.ReadMemStats(&mem)
+	_ = g.menuText.Println(strconv.Itoa(int(mem.HeapSys/1024)) + "k RAM, " + strconv.Itoa(int(mem.HeapIdle/1024)) + "k free")
+
 	err = g.driver.LateInit(g.menuText)
 	if err != nil {
 		_ = g.menuText.PrintlnInverse("late init: " + err.Error())
@@ -191,6 +198,8 @@ func (g *Gotogen) Init() error {
 	_ = g.menuText.Println(time.Now().Format(time.Stamp))
 	_ = g.menuText.Println("Booted in " + time.Now().Sub(g.start).Round(100*time.Millisecond).String())
 	_ = g.menuText.Println("Gotogen online.")
+
+	g.menuText.AutoFlush = false
 
 	g.blink()
 	g.init = true
@@ -231,15 +240,20 @@ func (g *Gotogen) RunTick() error {
 	g.tick++
 
 	if time.Since(g.lastSec) >= time.Second {
-		// TODO something better
-		_ = g.menuText.SetLine(7, time.Now().Format("03:04:05PM")+" "+strconv.Itoa(int(g.tick-g.lastTicks))+"fps")
+		frames := int(g.tick - g.lastTicks)
 		g.lastSec = time.Now()
 		g.lastTicks = g.tick
+
+		// TODO something better
+		mem := runtime.MemStats{}
+		runtime.ReadMemStats(&mem)
+		_ = g.menuText.SetLine(6, strconv.Itoa(int(mem.HeapSys/1024))+"k RAM, "+strconv.Itoa(int(mem.HeapIdle/1024))+"k free")
+		_ = g.menuText.SetLine(7, time.Now().Format("03:04:05PM")+" "+strconv.Itoa(frames)+"fps")
 	}
 
 	but := g.driver.PressedButton()
 	if but != MenuButtonNone {
-		_ = g.menuText.SetLine(6, "button: "+but.String())
+		_ = g.menuText.SetLine(5, "button: "+but.String())
 	}
 
 	if moveImg {
@@ -248,14 +262,18 @@ func (g *Gotogen) RunTick() error {
 		if imgX == 64 {
 			imgX = 0
 		}
-		// temp hack if mirroring
-		g.menuDisplay.Display()
 	}
 
 	err := g.faceDisplay.Display()
 	if err != nil {
 		g.panic(err)
 	}
+
+	err = g.menuText.Display()
+	if err != nil {
+		g.panic(err)
+	}
+
 	g.statusOn()
 	frameTime := time.Now().Sub(start)
 	g.log.Debugf("frame time %s", frameTime.String())
