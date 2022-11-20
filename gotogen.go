@@ -27,7 +27,6 @@ type Gotogen struct {
 	menuMirror  drivers.Displayer
 	menuText    *textbuf.Buffer // TODO interface
 	driver      Driver
-	log         Logger
 
 	init  bool
 	start time.Time
@@ -102,12 +101,9 @@ func (b MenuButton) String() string {
 	}
 }
 
-func New(framerate uint, log Logger, menu drivers.Displayer, status Blinker, driver Driver) (*Gotogen, error) {
+func New(framerate uint, menu drivers.Displayer, status Blinker, driver Driver) (*Gotogen, error) {
 	if framerate == 0 {
 		return nil, errors.New("must run at least one frame per second")
-	}
-	if log == nil {
-		log = stderrLogger{}
 	}
 	if menu == nil {
 		return nil, errors.New("must provide menu display")
@@ -122,7 +118,6 @@ func New(framerate uint, log Logger, menu drivers.Displayer, status Blinker, dri
 		menuDisplay: menu,
 		menuMirror:  mirror.New(menu),
 		status:      status,
-		log:         log,
 		driver:      driver,
 		start:       time.Now(),
 	}, nil
@@ -132,7 +127,7 @@ func (g *Gotogen) Init() error {
 	if g.init {
 		return errors.New("already initialized")
 	}
-	g.log.Info("starting init")
+	println("starting init")
 	g.blink()
 
 	var err error
@@ -203,7 +198,7 @@ func (g *Gotogen) Init() error {
 
 	g.blink()
 	g.init = true
-	g.log.Info("init complete")
+	println("init complete in", time.Now().Sub(g.start).Round(100*time.Millisecond).String())
 	return nil
 }
 
@@ -235,7 +230,6 @@ func (g *Gotogen) RunTick() error {
 		return errors.New("not initialized")
 	}
 
-	start := time.Now()
 	g.statusOff()
 	g.tick++
 
@@ -275,8 +269,6 @@ func (g *Gotogen) RunTick() error {
 	}
 
 	g.statusOn()
-	frameTime := time.Now().Sub(start)
-	g.log.Debugf("frame time %s", frameTime.String())
 	return nil
 }
 
@@ -284,7 +276,6 @@ func (g *Gotogen) RunTick() error {
 // that are fatal
 func (g *Gotogen) panic(v any) {
 	println(v)
-	g.log.Infof("%v", v)
 	for {
 		println(v)
 		g.blink()
