@@ -15,6 +15,8 @@ import (
 	"github.com/ajanata/gotogen/internal/mirror"
 )
 
+const menuTimeout = 10 * time.Second
+
 type Gotogen struct {
 	framerate   uint
 	frameTime   time.Duration
@@ -23,10 +25,14 @@ type Gotogen struct {
 	boopSensor  BoopSensor
 	status      Blinker
 
-	menuDisplay drivers.Displayer
-	menuMirror  drivers.Displayer
-	menuText    *textbuf.Buffer // TODO interface
-	driver      Driver
+	menuDisplay     drivers.Displayer
+	menuMirror      drivers.Displayer
+	menuText        *textbuf.Buffer // TODO interface
+	menuState       statusState
+	menuStateChange time.Time
+	activeMenu      Menuable
+
+	driver Driver
 
 	init  bool
 	start time.Time
@@ -34,6 +40,10 @@ type Gotogen struct {
 	tick      uint32
 	lastSec   time.Time
 	lastTicks uint32
+	lastFPS   uint32
+
+	// storing this once could be inaccurate on OS-based implementations, but you also don't really care in that case
+	totalRAM string
 }
 
 type Driver interface {
@@ -64,41 +74,9 @@ type Blinker interface {
 }
 
 type BoopSensor interface {
-	SettingProvider
+	MenuProvider
 
 	BoopDistance() uint8
-}
-
-type MenuButton uint8
-
-const (
-	MenuButtonNone = iota
-	MenuButtonMenu
-	MenuButtonBack
-	MenuButtonUp
-	MenuButtonDown
-	// MenuButtonDefault is for resetting a specific setting to its default value. Drivers may wish to require this
-	// button to be held down for a second before triggering it, or perhaps make it be a chord of up and down.
-	MenuButtonDefault
-)
-
-func (b MenuButton) String() string {
-	switch b {
-	case MenuButtonNone:
-		return "none"
-	case MenuButtonMenu:
-		return "menu"
-	case MenuButtonBack:
-		return "back"
-	case MenuButtonUp:
-		return "up"
-	case MenuButtonDown:
-		return "down"
-	case MenuButtonDefault:
-		return "default"
-	default:
-		return "INVALID"
-	}
 }
 
 func New(framerate uint, menu drivers.Displayer, status Blinker, driver Driver) (*Gotogen, error) {
@@ -160,9 +138,6 @@ func (g *Gotogen) Init() error {
 	if faceDisplay == nil {
 		return errors.New("init did not provide face")
 	}
-	// if menuInput == nil {
-	// 	return errors.New("init did not provide menu input")
-	// }
 
 	g.faceDisplay = faceDisplay
 	g.faceMirror = mirror.New(faceDisplay)
@@ -181,6 +156,7 @@ func (g *Gotogen) Init() error {
 	_ = g.menuText.Println("CPUs: " + strconv.Itoa(runtime.NumCPU()))
 	mem := runtime.MemStats{}
 	runtime.ReadMemStats(&mem)
+	g.totalRAM = strconv.Itoa(int(mem.HeapSys / 1024))
 	_ = g.menuText.Println(strconv.Itoa(int(mem.HeapSys/1024)) + "k RAM, " + strconv.Itoa(int(mem.HeapIdle/1024)) + "k free")
 
 	err = g.driver.LateInit(g.menuText)
@@ -195,6 +171,7 @@ func (g *Gotogen) Init() error {
 	_ = g.menuText.Println("Gotogen online.")
 
 	g.menuText.AutoFlush = false
+	g.menuStateChange = time.Now()
 
 	g.blink()
 	g.init = true
@@ -233,22 +210,17 @@ func (g *Gotogen) RunTick() error {
 	g.statusOff()
 	g.tick++
 
+	redraw := false
 	if time.Since(g.lastSec) >= time.Second {
-		frames := int(g.tick - g.lastTicks)
+		g.lastFPS = g.tick - g.lastTicks
 		g.lastSec = time.Now()
 		g.lastTicks = g.tick
-
-		// TODO something better
-		mem := runtime.MemStats{}
-		runtime.ReadMemStats(&mem)
-		_ = g.menuText.SetLine(6, strconv.Itoa(int(mem.HeapSys/1024))+"k RAM, "+strconv.Itoa(int(mem.HeapIdle/1024))+"k free")
-		_ = g.menuText.SetLine(7, time.Now().Format("03:04:05PM")+" "+strconv.Itoa(frames)+"fps")
+		redraw = true
 	}
 
-	but := g.driver.PressedButton()
-	if but != MenuButtonNone {
-		_ = g.menuText.SetLine(5, "button: "+but.String())
-	}
+	g.updateStatus(redraw)
+
+	// TODO begin temporary animation for performance testing
 
 	if moveImg {
 		g.SetFullFace(cant, imgX, 0)
@@ -258,18 +230,148 @@ func (g *Gotogen) RunTick() error {
 		}
 	}
 
+	// TODO end temporary animation for performance testing
+
 	err := g.faceDisplay.Display()
 	if err != nil {
 		g.panic(err)
 	}
 
-	err = g.menuText.Display()
-	if err != nil {
-		g.panic(err)
+	if g.menuState != statusStateBlank {
+		err = g.menuText.Display()
+		if err != nil {
+			g.panic(err)
+		}
 	}
 
 	g.statusOn()
 	return nil
+}
+
+func (g *Gotogen) drawIdleStatus() {
+	mem := runtime.MemStats{}
+	runtime.ReadMemStats(&mem)
+	// TODO switch which line this is on every minute or so for burn-in protection
+	_ = g.menuText.SetLine(0, time.Now().Format("03:04")+" "+strconv.Itoa(int(g.lastFPS))+"Hz "+strconv.Itoa(int(mem.HeapIdle/1024))+"k/"+g.totalRAM+"k")
+	_ = g.menuText.SetY(1)
+	_ = g.menuText.Println("TODO: more stuff, like at least indicating what states are being displayed outside")
+}
+
+func (g *Gotogen) updateStatus(redraw bool) {
+	switch g.menuState {
+	case statusStateBoot:
+		if time.Now().After(g.menuStateChange.Add(menuTimeout)) {
+			g.changeStatusState(statusStateIdle)
+			break
+		}
+		// any button press clears the boot log
+		if g.driver.PressedButton() != MenuButtonNone {
+			g.changeStatusState(statusStateIdle)
+		}
+	case statusStateIdle:
+		if g.driver.PressedButton() == MenuButtonMenu {
+			g.changeStatusState(statusStateMenu)
+			break
+		}
+
+		if redraw {
+			g.drawIdleStatus()
+		}
+	case statusStateMenu:
+		if time.Now().After(g.menuStateChange.Add(menuTimeout)) {
+			g.changeStatusState(statusStateIdle)
+			break
+		}
+
+		switch g.driver.PressedButton() {
+		case MenuButtonBack:
+			g.menuStateChange = time.Now()
+			if g.activeMenu.Prev() == nil {
+				// at top level menu
+				g.changeStatusState(statusStateIdle)
+			} else {
+				m := g.activeMenu
+				g.activeMenu = g.activeMenu.Prev()
+				m.SetPrev(nil)
+				g.activeMenu.Render(g.menuText)
+			}
+		case MenuButtonMenu:
+			g.menuStateChange = time.Now()
+			switch active := g.activeMenu.(type) {
+			case *Menu:
+				switch item := active.Items[active.selected].(type) {
+				case *Menu:
+					item.prev, g.activeMenu = g.activeMenu, item
+					item.Render(g.menuText)
+				case ActionItem:
+					item.Invoke()
+				case *SettingItem:
+					item.prev, g.activeMenu = g.activeMenu, item
+					item.selected = item.Active
+					_, h := g.menuText.Size()
+					if item.selected > item.top+uint8(h)-2 {
+						// TODO avoid empty lines at the bottom
+						item.top = item.selected
+					}
+					item.Render(g.menuText)
+				}
+			case *SettingItem:
+				active.Active = active.selected
+				g.activeMenu, active.prev = active.prev, nil
+				g.activeMenu.Render(g.menuText)
+			}
+		case MenuButtonUp:
+			g.menuStateChange = time.Now()
+			if g.activeMenu.Selected() > 0 {
+				g.activeMenu.SetSelected(g.activeMenu.Selected() - 1)
+			}
+			if g.activeMenu.Selected() < g.activeMenu.Top() {
+				g.activeMenu.SetTop(g.activeMenu.Selected())
+			}
+			g.activeMenu.Render(g.menuText)
+		case MenuButtonDown:
+			g.menuStateChange = time.Now()
+			g.activeMenu.SetSelected(g.activeMenu.Selected() + 1)
+			if g.activeMenu.Selected() > g.activeMenu.Len()-1 {
+				g.activeMenu.SetSelected(g.activeMenu.Len() - 1)
+			}
+			_, h := g.menuText.Size()
+			if g.activeMenu.Selected() > g.activeMenu.Top()+uint8(h)-2 {
+				g.activeMenu.SetTop(g.activeMenu.Top() + 1)
+			}
+			g.activeMenu.Render(g.menuText)
+		}
+	case statusStateBlank:
+		// nothing to do
+	}
+}
+
+func (g *Gotogen) changeStatusState(state statusState) {
+	switch state {
+	case statusStateIdle:
+		g.activeMenu = nil
+		g.menuStateChange = time.Now()
+		g.menuText.Clear()
+		g.drawIdleStatus()
+	case statusStateBlank:
+		g.activeMenu = nil
+		// clear text buffer
+		g.menuText.Clear()
+		// but make sure we clear the *entire* screen, including pixels outside the coverage of the text buffer
+		w, h := g.menuDisplay.Size()
+		for x := int16(0); x < w; x++ {
+			for y := int16(0); y < h; y++ {
+				g.menuDisplay.SetPixel(x, y, color.RGBA{})
+			}
+		}
+		// since it won't be drawn in the main loop
+		_ = g.menuDisplay.Display()
+	case statusStateMenu:
+		g.activeMenu = &mainMenu
+		mainMenu.Render(g.menuText)
+	}
+	g.menuState = state
+	g.menuStateChange = time.Now()
 }
 
 // unfortunately you can't recover runtime panics in tinygo, so this is just going to be used for things we detect
