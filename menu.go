@@ -47,22 +47,22 @@ func (m *Menu) Render(buf *textbuf.Buffer) {
 	buf.Clear()
 	_, h := buf.Size()
 	// TODO center
-	buf.SetLineInverse(0, m.Name)
+	_ = buf.SetLineInverse(0, m.Name)
 	for i := uint8(0); i+m.top < uint8(len(m.Items)) && i < uint8(h-1); i++ {
 		item := m.Items[i+m.top]
 		var prefix string
 		switch item.(type) {
 		case *Menu:
 			prefix = "+"
-		case ActionItem:
+		case *ActionItem:
 			prefix = "*"
 		case *SettingItem:
 			prefix = ">"
 		}
 		if i == m.selected-m.top {
-			buf.SetLineInverse(int16(i+1), prefix+item.name())
+			_ = buf.SetLineInverse(int16(i+1), prefix+item.name())
 		} else {
-			buf.SetLine(int16(i+1), prefix+item.name())
+			_ = buf.SetLine(int16(i+1), prefix+item.name())
 		}
 	}
 }
@@ -72,7 +72,7 @@ type ActionItem struct {
 	Invoke func()
 }
 
-func (i ActionItem) name() string {
+func (i *ActionItem) name() string {
 	return i.Name
 }
 
@@ -84,6 +84,7 @@ type SettingItem struct {
 	top      uint8
 	selected uint8
 	prev     Menuable
+	Apply    func(selected uint8)
 }
 
 func (si *SettingItem) name() string { return si.Name }
@@ -106,7 +107,7 @@ func (si *SettingItem) Render(buf *textbuf.Buffer) {
 	buf.Clear()
 	_, h := buf.Size()
 	// TODO center
-	buf.SetLineInverse(0, si.Name)
+	_ = buf.SetLineInverse(0, si.Name)
 	for i := uint8(0); i+si.top < uint8(len(si.Options)) && i < uint8(h-1); i++ {
 		item := si.Options[i+si.top]
 		prefix := " "
@@ -114,80 +115,13 @@ func (si *SettingItem) Render(buf *textbuf.Buffer) {
 			prefix = "*"
 		}
 		if i == si.selected-si.top {
-			buf.SetLineInverse(int16(i+1), prefix+item)
+			_ = buf.SetLineInverse(int16(i+1), prefix+item)
 		} else {
-			buf.SetLine(int16(i+1), prefix+item)
+			_ = buf.SetLine(int16(i+1), prefix+item)
 		}
 	}
 }
 
 type MenuProvider interface {
 	GetMenu() Menu
-}
-
-var mainMenu = Menu{
-	Name: "GOTOGEN MENU",
-	Items: []Item{
-		&Menu{
-			Name: "Submenu 1",
-			Items: []Item{
-				&Menu{
-					Name: "Sub-submenu 1",
-					Items: []Item{
-						ActionItem{
-							Name:   "sub-submenu 1 action 1",
-							Invoke: func() { println("action pressed") },
-						},
-						ActionItem{
-							Name:   "sub-submenu 1 action 2",
-							Invoke: func() { println("action pressed") },
-						},
-						&SettingItem{
-							Name: "sub-submenu 1 setting 1",
-						},
-					},
-				},
-				ActionItem{
-					Name:   "submenu 1 action 1",
-					Invoke: func() { println("action pressed") },
-				},
-			},
-		},
-		&Menu{
-			Name: "Submenu 2",
-			Items: []Item{
-				&SettingItem{
-					Name: "submenu 2 setting 1",
-				},
-				&SettingItem{
-					Name: "submenu 2 setting 2",
-				},
-			},
-		},
-		ActionItem{
-			Name:   "Action 1",
-			Invoke: func() { println("action pressed") },
-		},
-		&SettingItem{
-			Name:    "Setting 1",
-			Active:  1,
-			Default: 1,
-			Options: []string{"A", "B", "C", "D", "E", "F", "G", "H"},
-		},
-		&SettingItem{
-			Name: "Setting 2",
-		},
-		&SettingItem{
-			Name: "Setting 3",
-		},
-		&SettingItem{
-			Name: "Setting 4",
-		},
-		&SettingItem{
-			Name: "Setting 5",
-		},
-		&SettingItem{
-			Name: "Setting 6",
-		},
-	},
 }

@@ -17,19 +17,32 @@ import (
 
 const menuTimeout = 10 * time.Second
 
+type SensorStatus uint8
+
+const (
+	// SensorStatusUnavailable indicates that the sensor is never available (not implemented in hardware).
+	SensorStatusUnavailable = iota
+	// SensorStatusAvailable indicates that the returned value(s) is/are accurate.
+	SensorStatusAvailable
+	// SensorStatusBusy indicates that the sensor is temporarily unavailable e.g. due to bus contention.
+	SensorStatusBusy
+)
+
 type Gotogen struct {
 	framerate   uint
 	frameTime   time.Duration
 	faceDisplay drivers.Displayer
 	faceMirror  drivers.Displayer
-	boopSensor  BoopSensor
 	status      Blinker
+	boopDist    uint8
+	aX, aY, aZ  int32 // accelerometer
 
 	menuDisplay     drivers.Displayer
 	menuMirror      drivers.Displayer
 	menuText        *textbuf.Buffer // TODO interface
 	menuState       statusState
 	menuStateChange time.Time
+	rootMenu        Menu
 	activeMenu      Menuable
 
 	driver Driver
@@ -50,7 +63,7 @@ type Driver interface {
 	// EarlyInit initializes secondary devices after the primary menu display has been initialized for boot
 	// messages. Hardware drivers shall configure any buses (SPI, etc.) that are required to communicate with these
 	// devices at this point, and should only configure the bare minimum to call New.
-	EarlyInit() (faceDisplay drivers.Displayer, boopSensor BoopSensor, err error)
+	EarlyInit() (faceDisplay drivers.Displayer, err error)
 
 	// LateInit performs any late initialization (e.g. connecting to wifi to set the clock). The failure of anything in
 	// LateInit should not cause the failure of the entire process; returning an error is to simplify logging. Boot
@@ -66,17 +79,24 @@ type Driver interface {
 	//
 	// This function should expect to be called at the main loop framerate.
 	PressedButton() MenuButton
+
+	// MenuItems is invoked every time the menu is displayed to retrieve the current menu items for the driver. The
+	// driver may return different menu items depending on current state.
+	MenuItems() []Item
+
+	// BoopDistance is a normalized value for the closeness of a boop. TODO define the normalization
+	// The second return value indicates the status of the boop sensor: does not exist, valid data, or busy.
+	BoopDistance() (uint8, SensorStatus)
+
+	// Accelerometer is a normalized value for accelerometer values. When not in motion,
+	// all values should be approximately zero. Drivers should provide a calibration option to zero out the sensor.
+	// The second return value indicates the status of the accelerometer: does not exist, valid data, or busy.
+	Accelerometer() (x, y, z int32, status SensorStatus)
 }
 
 type Blinker interface {
 	Low()
 	High()
-}
-
-type BoopSensor interface {
-	MenuProvider
-
-	BoopDistance() uint8
 }
 
 func New(framerate uint, menu drivers.Displayer, status Blinker, driver Driver) (*Gotogen, error) {
@@ -130,7 +150,7 @@ func (g *Gotogen) Init() error {
 	// we already know it was possible to print text so don't bother checking every time
 	_ = g.menuText.Print("Initialize devices")
 
-	faceDisplay, boopSensor, err := g.driver.EarlyInit()
+	faceDisplay, err := g.driver.EarlyInit()
 	if err != nil {
 		_ = g.menuText.PrintlnInverse(err.Error())
 		return errors.New("early init: " + err.Error())
@@ -141,17 +161,14 @@ func (g *Gotogen) Init() error {
 
 	g.faceDisplay = faceDisplay
 	g.faceMirror = mirror.New(faceDisplay)
-	g.boopSensor = boopSensor
 	_ = g.menuText.Println(".")
 
-	// now that we have the face panels set up, we can boot a loading image on them while LateInit runs
-	busy, err := media.LoadImage(media.TypeFull, "wait")
+	// now that we have the face panels set up, we can put a loading image on them while LateInit runs
+	err = g.busy()
 	if err != nil {
 		_ = g.menuText.PrintlnInverse("load busy: " + err.Error())
 		return errors.New("load busy: " + err.Error())
 	}
-	g.SetFullFace(busy, 0, 0)
-	_ = g.faceDisplay.Display()
 
 	_ = g.menuText.Println("CPUs: " + strconv.Itoa(runtime.NumCPU()))
 	mem := runtime.MemStats{}
@@ -164,6 +181,8 @@ func (g *Gotogen) Init() error {
 		_ = g.menuText.PrintlnInverse("late init: " + err.Error())
 		// LateInit is not allowed to cause the boot to fail
 	}
+
+	g.initMainMenu()
 
 	_ = g.menuText.Println("The time is now")
 	_ = g.menuText.Println(time.Now().Format(time.Stamp))
@@ -252,8 +271,24 @@ func (g *Gotogen) drawIdleStatus() {
 	mem := runtime.MemStats{}
 	runtime.ReadMemStats(&mem)
 	// TODO switch which line this is on every minute or so for burn-in protection
-	_ = g.menuText.SetLine(0, time.Now().Format("03:04")+" "+strconv.Itoa(int(g.lastFPS))+"Hz "+strconv.Itoa(int(mem.HeapIdle/1024))+"k/"+g.totalRAM+"k")
-	_ = g.menuText.SetY(1)
+	_ = g.menuText.SetLine(0, time.Now().Format("03:04"), " ", strconv.Itoa(int(g.lastFPS)), "Hz ", strconv.Itoa(int(mem.HeapIdle/1024)), "k/", g.totalRAM, "k")
+
+	d, st := g.driver.BoopDistance()
+	if st == SensorStatusAvailable {
+		g.boopDist = d
+	}
+
+	x, y, z, st := g.driver.Accelerometer()
+	if st == SensorStatusAvailable {
+		x /= 1000
+		y /= 1000
+		z /= 1000
+		g.aX, g.aY, g.aZ = x, y, z
+	}
+
+	// TODO temp hack
+	_ = g.menuText.SetLine(1, strconv.Itoa(int(g.boopDist)), " ", strconv.Itoa(int(g.aX)), " ", strconv.Itoa(int(g.aY)), " ", strconv.Itoa(int(g.aZ)))
+	_ = g.menuText.SetY(2)
 	_ = g.menuText.Println("TODO: more stuff, like at least indicating what states are being displayed outside")
 }
 
@@ -299,24 +334,29 @@ func (g *Gotogen) updateStatus(redraw bool) {
 			g.menuStateChange = time.Now()
 			switch active := g.activeMenu.(type) {
 			case *Menu:
+				// in case a menu is empty for some reason
+				if len(active.Items) == 0 || int(active.selected) > len(active.Items) {
+					break
+				}
 				switch item := active.Items[active.selected].(type) {
 				case *Menu:
 					item.prev, g.activeMenu = g.activeMenu, item
 					item.Render(g.menuText)
-				case ActionItem:
+				case *ActionItem:
 					item.Invoke()
 				case *SettingItem:
 					item.prev, g.activeMenu = g.activeMenu, item
 					item.selected = item.Active
 					_, h := g.menuText.Size()
 					if item.selected > item.top+uint8(h)-2 {
-						// TODO avoid empty lines at the bottom
+						// TODO avoid empty lines at the bottom?
 						item.top = item.selected
 					}
 					item.Render(g.menuText)
 				}
 			case *SettingItem:
 				active.Active = active.selected
+				active.Apply(active.selected)
 				g.activeMenu, active.prev = active.prev, nil
 				g.activeMenu.Render(g.menuText)
 			}
@@ -342,7 +382,9 @@ func (g *Gotogen) updateStatus(redraw bool) {
 			g.activeMenu.Render(g.menuText)
 		}
 	case statusStateBlank:
-		// nothing to do
+		if g.driver.PressedButton() != MenuButtonNone {
+			g.changeStatusState(statusStateIdle)
+		}
 	}
 }
 
@@ -367,8 +409,10 @@ func (g *Gotogen) changeStatusState(state statusState) {
 		// since it won't be drawn in the main loop
 		_ = g.menuDisplay.Display()
 	case statusStateMenu:
-		g.activeMenu = &mainMenu
-		mainMenu.Render(g.menuText)
+		m := g.rootMenu.Items[0].(*Menu)
+		m.Items = g.driver.MenuItems()
+		g.activeMenu = &g.rootMenu
+		g.rootMenu.Render(g.menuText)
 	}
 	g.menuState = state
 	g.menuStateChange = time.Now()
@@ -423,4 +467,120 @@ func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16) {
 			// g.menuMirror.SetPixel(xx, (int16(y)+offY)%32, color.RGBA{uint8(r), 0, 0, 1})
 		}
 	}
+}
+
+func (g *Gotogen) initMainMenu() {
+	g.rootMenu = Menu{
+		Name: "GOTOGEN MENU",
+		Items: []Item{
+			// This must be first, and will be filled in by the driver's menu items every time the menu is displayed.
+			&Menu{
+				Name: "Hardware Settings",
+			},
+			&ActionItem{
+				Name:   "Blank status screen",
+				Invoke: func() { g.changeStatusState(statusStateBlank) },
+			},
+			&Menu{
+				Name: "Submenu 1",
+				Items: []Item{
+					&Menu{
+						Name: "Sub-submenu 1",
+						Items: []Item{
+							&ActionItem{
+								Name:   "sub-submenu 1 action 1",
+								Invoke: func() { println("action pressed") },
+							},
+							&ActionItem{
+								Name:   "sub-submenu 1 action 2",
+								Invoke: func() { println("action pressed") },
+							},
+							&SettingItem{
+								Name:  "sub-submenu 1 setting 1",
+								Apply: func(uint8) { println("setting saved") },
+							},
+						},
+					},
+					&ActionItem{
+						Name:   "submenu 1 action 1",
+						Invoke: func() { println("action pressed") },
+					},
+				},
+			},
+			&Menu{
+				Name: "Submenu 2",
+				Items: []Item{
+					&SettingItem{
+						Name: "submenu 2 setting 1",
+					},
+					&SettingItem{
+						Name: "submenu 2 setting 2",
+					},
+				},
+			},
+			&ActionItem{
+				Name:   "Action 1",
+				Invoke: func() { println("action pressed") },
+			},
+			&SettingItem{
+				Name:    "Setting 1",
+				Active:  1,
+				Default: 1,
+				Options: []string{"A", "B", "C", "D", "E", "F", "G", "H"},
+				Apply:   func(s uint8) { println("setting saved " + strconv.Itoa(int(s))) },
+			},
+			&SettingItem{
+				Name:  "Setting 2",
+				Apply: func(uint8) { println("setting saved") },
+			},
+			&SettingItem{
+				Name:  "Setting 3",
+				Apply: func(uint8) { println("setting saved") },
+			},
+			&SettingItem{
+				Name:  "Setting 4",
+				Apply: func(uint8) { println("setting saved") },
+			},
+			&SettingItem{
+				Name:  "Setting 5",
+				Apply: func(uint8) { println("setting saved") },
+			},
+			&SettingItem{
+				Name:  "Setting 6",
+				Apply: func(uint8) { println("setting saved") },
+			},
+		},
+	}
+}
+
+func (g *Gotogen) Busy(f func(buffer *textbuf.Buffer)) {
+	g.menuText.AutoFlush = true
+	g.menuText.Clear()
+
+	err := g.busy()
+	if err != nil {
+		print("unable to load busy", err)
+		_ = g.menuText.PrintlnInverse("loading busy: " + err.Error())
+	}
+	f(g.menuText)
+
+	s := time.Now()
+	for time.Now().Before(s.Add(5 * time.Second)) {
+		if g.driver.PressedButton() != MenuButtonNone {
+			break
+		}
+	}
+
+	g.menuText.AutoFlush = false
+	g.changeStatusState(statusStateIdle)
+}
+
+func (g *Gotogen) busy() error {
+	busy, err := media.LoadImage(media.TypeFull, "wait")
+	if err != nil {
+		return errors.New("load busy: " + err.Error())
+	}
+	g.SetFullFace(busy, 0, 0)
+	_ = g.faceDisplay.Display()
+	return nil
 }
