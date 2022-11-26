@@ -66,11 +66,10 @@ type Driver interface {
 	EarlyInit() (faceDisplay drivers.Displayer, err error)
 
 	// LateInit performs any late initialization (e.g. connecting to wifi to set the clock). The failure of anything in
-	// LateInit should not cause the failure of the entire process; returning an error is to simplify logging. Boot
-	// messages may be freely logged.
+	// LateInit should not cause the failure of the entire process. Boot messages may be freely logged.
 	//
 	// TODO interface
-	LateInit(buffer *textbuf.Buffer) error
+	LateInit(buffer *textbuf.Buffer)
 
 	// PressedButton returns the currently-pressed menu button. The implementation is responsible for prioritizing
 	// multiple buttons being pressed at the same time however it sees fit (or implement some buttons as a chord of
@@ -176,12 +175,7 @@ func (g *Gotogen) Init() error {
 	g.totalRAM = strconv.Itoa(int(mem.HeapSys / 1024))
 	_ = g.menuText.Println(strconv.Itoa(int(mem.HeapSys/1024)) + "k RAM, " + strconv.Itoa(int(mem.HeapIdle/1024)) + "k free")
 
-	err = g.driver.LateInit(g.menuText)
-	if err != nil {
-		_ = g.menuText.PrintlnInverse("late init: " + err.Error())
-		// LateInit is not allowed to cause the boot to fail
-	}
-
+	g.driver.LateInit(g.menuText)
 	g.initMainMenu()
 
 	_ = g.menuText.Println("The time is now")
@@ -229,20 +223,34 @@ func (g *Gotogen) RunTick() error {
 	g.statusOff()
 	g.tick++
 
-	redraw := false
+	// redraw := false
 	if time.Since(g.lastSec) >= time.Second {
 		g.lastFPS = g.tick - g.lastTicks
 		g.lastSec = time.Now()
 		g.lastTicks = g.tick
-		redraw = true
+		// redraw = true
 	}
 
-	g.updateStatus(redraw)
+	// read sensors
+	d, st := g.driver.BoopDistance()
+	if st == SensorStatusAvailable {
+		g.boopDist = d
+	}
+
+	x, y, z, st := g.driver.Accelerometer()
+	if st == SensorStatusAvailable {
+		x /= 1000
+		y /= 1000
+		z /= 1000
+		g.aX, g.aY, g.aZ = x, y, z
+	}
+
+	g.updateStatus(st == SensorStatusAvailable)
 
 	// TODO begin temporary animation for performance testing
 
 	if moveImg {
-		g.SetFullFace(cant, imgX, 0)
+		g.SetFullFace(cant, imgX, 0, st == SensorStatusAvailable)
 		imgX++
 		if imgX == 64 {
 			imgX = 0
@@ -273,23 +281,10 @@ func (g *Gotogen) drawIdleStatus() {
 	// TODO switch which line this is on every minute or so for burn-in protection
 	_ = g.menuText.SetLine(0, time.Now().Format("03:04"), " ", strconv.Itoa(int(g.lastFPS)), "Hz ", strconv.Itoa(int(mem.HeapIdle/1024)), "k/", g.totalRAM, "k")
 
-	d, st := g.driver.BoopDistance()
-	if st == SensorStatusAvailable {
-		g.boopDist = d
-	}
-
-	x, y, z, st := g.driver.Accelerometer()
-	if st == SensorStatusAvailable {
-		x /= 1000
-		y /= 1000
-		z /= 1000
-		g.aX, g.aY, g.aZ = x, y, z
-	}
-
 	// TODO temp hack
 	_ = g.menuText.SetLine(1, strconv.Itoa(int(g.boopDist)), " ", strconv.Itoa(int(g.aX)), " ", strconv.Itoa(int(g.aY)), " ", strconv.Itoa(int(g.aZ)))
 	_ = g.menuText.SetY(2)
-	_ = g.menuText.Println("TODO: more stuff, like at least indicating what states are being displayed outside")
+	// _ = g.menuText.Println("TODO: more stuff, like at least indicating what states are being displayed outside")
 }
 
 func (g *Gotogen) updateStatus(redraw bool) {
@@ -447,7 +442,7 @@ func (g *Gotogen) statusOff() {
 	}
 }
 
-func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16) {
+func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16, drawMenu bool) {
 	b := img.Bounds()
 	for x := b.Min.X; x < b.Max.X; x++ {
 		xx := (64 - int16(x) + offX) % 64
@@ -455,16 +450,17 @@ func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16) {
 			r, gr, b, a := img.At(x, y).RGBA()
 			// FIXME remove hardcoded dimensions and origin flip
 			g.faceMirror.SetPixel(xx, (int16(y)+offY)%32, color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
-			// g.faceMirror.SetPixel(xx, (int16(31-y)+offY)%32, color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
 
-			// mirror to menu
-			// // RGBA returns each channel |= itself << 8 for whatever reason
-			// r &= 0xFF
-			// if r < 0xA0 {
-			// 	r = 0
-			// }
-			// // FIXME remove hardcoded dimensions
-			// g.menuMirror.SetPixel(xx, (int16(y)+offY)%32, color.RGBA{uint8(r), 0, 0, 1})
+			if drawMenu {
+				// mirror to menu
+				// RGBA returns each channel |= itself << 8 for whatever reason
+				r &= 0xFF
+				if r < 0xA0 {
+					r = 0
+				}
+				// FIXME remove hardcoded dimensions
+				g.menuMirror.SetPixel(xx, 32+(int16(y)+offY)%32, color.RGBA{uint8(r), 0, 0, 1})
+			}
 		}
 	}
 }
@@ -580,7 +576,7 @@ func (g *Gotogen) busy() error {
 	if err != nil {
 		return errors.New("load busy: " + err.Error())
 	}
-	g.SetFullFace(busy, 0, 0)
+	g.SetFullFace(busy, 0, 0, false)
 	_ = g.faceDisplay.Display()
 	return nil
 }
