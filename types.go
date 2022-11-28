@@ -1,9 +1,22 @@
 package gotogen
 
+import (
+	"tinygo.org/x/drivers"
+)
+
+type Display interface {
+	drivers.Displayer
+
+	// CanUpdateNow indicates that the device is able to take a new frame right now. This is useful if the device is
+	// driven by a DMA transfer, and the previous transfer has not yet completed. Displays should still support Display
+	// being called before they are ready to update; in this case, they should block until the next update is possible.
+	CanUpdateNow() bool
+}
+
 type MenuButton uint8
 
 const (
-	MenuButtonNone = iota
+	MenuButtonNone MenuButton = iota
 	MenuButtonMenu
 	MenuButtonBack
 	MenuButtonUp
@@ -36,7 +49,7 @@ func (b MenuButton) String() string {
 type statusState uint8
 
 const (
-	statusStateBoot = iota
+	statusStateBoot statusState = iota
 	statusStateIdle
 	statusStateMenu
 	statusStateBlank
@@ -56,3 +69,32 @@ func (s statusState) String() string {
 		return "INVALID"
 	}
 }
+
+type faceState uint8
+
+const (
+	faceStateBusy faceState = iota
+	faceStateDefault
+	faceStateAnimation // TODO maybe each animation type is defined here to make it easier?
+)
+
+func (s faceState) String() string {
+	switch s {
+	case faceStateBusy:
+		return "busy"
+	case faceStateDefault:
+		return "default"
+	case faceStateAnimation:
+		return "animation"
+	default:
+		return "INVALID"
+	}
+}
+
+type colorChannel uint8
+
+const (
+	red colorChannel = iota
+	green
+	blue
+)

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ajanata/textbuf"
-	"tinygo.org/x/drivers"
 
 	"github.com/ajanata/gotogen/internal/media"
 	"github.com/ajanata/gotogen/internal/mirror"
@@ -29,21 +28,26 @@ const (
 )
 
 type Gotogen struct {
-	framerate   uint
-	frameTime   time.Duration
-	faceDisplay drivers.Displayer
-	faceMirror  drivers.Displayer
-	status      Blinker
-	boopDist    uint8
-	aX, aY, aZ  int32 // accelerometer
+	framerate  uint
+	frameTime  time.Duration
+	status     Blinker
+	boopDist   uint8
+	aX, aY, aZ int32 // accelerometer
 
-	menuDisplay     drivers.Displayer
-	menuMirror      drivers.Displayer
-	menuText        *textbuf.Buffer // TODO interface
-	menuState       statusState
-	menuStateChange time.Time
-	rootMenu        Menu
-	activeMenu      Menuable
+	faceDisplay Display
+	faceMirror  Display
+	faceState   faceState
+
+	menuDisplay              Display
+	menuMirror               Display
+	menuText                 *textbuf.Buffer // TODO interface
+	menuState                statusState
+	menuStateChange          time.Time
+	menuMirrorSkip           uint8
+	menuMirrorDownmixChannel colorChannel
+	menuMirrorDownmixCutoff  uint8
+	rootMenu                 Menu
+	activeMenu               Menuable
 
 	driver Driver
 
@@ -63,7 +67,7 @@ type Driver interface {
 	// EarlyInit initializes secondary devices after the primary menu display has been initialized for boot
 	// messages. Hardware drivers shall configure any buses (SPI, etc.) that are required to communicate with these
 	// devices at this point, and should only configure the bare minimum to call New.
-	EarlyInit() (faceDisplay drivers.Displayer, err error)
+	EarlyInit() (faceDisplay Display, err error)
 
 	// LateInit performs any late initialization (e.g. connecting to wifi to set the clock). The failure of anything in
 	// LateInit should not cause the failure of the entire process. Boot messages may be freely logged.
@@ -79,16 +83,17 @@ type Driver interface {
 	// This function should expect to be called at the main loop framerate.
 	PressedButton() MenuButton
 
-	// MenuItems is invoked every time the menu is displayed to retrieve the current menu items for the driver. The
-	// driver may return different menu items depending on current state.
+	// MenuItems is invoked every time the menu is displayed to retrieve the current menu items for the driver.
+	// The driver may return different menu items depending on current state.
 	MenuItems() []Item
 
 	// BoopDistance is a normalized value for the closeness of a boop. TODO define the normalization
 	// The second return value indicates the status of the boop sensor: does not exist, valid data, or busy.
 	BoopDistance() (uint8, SensorStatus)
 
-	// Accelerometer is a normalized value for accelerometer values. When not in motion,
-	// all values should be approximately zero. Drivers should provide a calibration option to zero out the sensor.
+	// Accelerometer is a normalized value for accelerometer values. TODO define the scale of the normalized values
+	// When not in motion, all values should be approximately zero.
+	// Drivers should provide a calibration option to zero out the sensor.
 	// The second return value indicates the status of the accelerometer: does not exist, valid data, or busy.
 	Accelerometer() (x, y, z int32, status SensorStatus)
 }
@@ -98,7 +103,7 @@ type Blinker interface {
 	High()
 }
 
-func New(framerate uint, menu drivers.Displayer, status Blinker, driver Driver) (*Gotogen, error) {
+func New(framerate uint, menu Display, status Blinker, driver Driver) (*Gotogen, error) {
 	if framerate == 0 {
 		return nil, errors.New("must run at least one frame per second")
 	}
@@ -186,6 +191,10 @@ func (g *Gotogen) Init() error {
 	g.menuText.AutoFlush = false
 	g.menuStateChange = time.Now()
 
+	// TODO load from settings storage; this is also defined in initMainMenu
+	g.menuMirrorSkip = 4
+	g.menuMirrorDownmixCutoff = 0xA0
+
 	g.blink()
 	g.init = true
 	println("init complete in", time.Now().Sub(g.start).Round(100*time.Millisecond).String())
@@ -195,7 +204,7 @@ func (g *Gotogen) Init() error {
 // Run does not return. It attempts to run the main loop at the framerate specified in New.
 func (g *Gotogen) Run() {
 	var err error
-	cant, err = media.LoadImage(media.TypeFull, "Elbrarmemestickerscant")
+	cant, err = media.LoadImage(media.TypeFull, "cant")
 	if err != nil {
 		g.panic(err)
 	}
@@ -223,12 +232,15 @@ func (g *Gotogen) RunTick() error {
 	g.statusOff()
 	g.tick++
 
-	// redraw := false
+	// busy states clear when we get back to the run loop
+	if g.faceState == faceStateBusy {
+		g.faceState = faceStateDefault
+	}
+
 	if time.Since(g.lastSec) >= time.Second {
 		g.lastFPS = g.tick - g.lastTicks
 		g.lastSec = time.Now()
 		g.lastTicks = g.tick
-		// redraw = true
 	}
 
 	// read sensors
@@ -245,12 +257,18 @@ func (g *Gotogen) RunTick() error {
 		g.aX, g.aY, g.aZ = x, y, z
 	}
 
-	g.updateStatus(st == SensorStatusAvailable)
+	// TODO better way to framerate limit the status screen
+	canRedrawStatus := g.menuDisplay.CanUpdateNow()
+	if g.menuMirrorSkip > 0 {
+		canRedrawStatus = canRedrawStatus && uint8(g.tick)%g.menuMirrorSkip == 0
+	}
+	// we always need to call this tho since the menu handling code is in here
+	g.updateStatus(canRedrawStatus)
 
 	// TODO begin temporary animation for performance testing
 
 	if moveImg {
-		g.SetFullFace(cant, imgX, 0, st == SensorStatusAvailable)
+		g.SetFullFace(cant, imgX, 0, canRedrawStatus)
 		imgX++
 		if imgX == 64 {
 			imgX = 0
@@ -264,7 +282,7 @@ func (g *Gotogen) RunTick() error {
 		g.panic(err)
 	}
 
-	if g.menuState != statusStateBlank {
+	if g.menuState != statusStateBlank && canRedrawStatus {
 		err = g.menuText.Display()
 		if err != nil {
 			g.panic(err)
@@ -280,14 +298,13 @@ func (g *Gotogen) drawIdleStatus() {
 	runtime.ReadMemStats(&mem)
 	// TODO switch which line this is on every minute or so for burn-in protection
 	_ = g.menuText.SetLine(0, time.Now().Format("03:04"), " ", strconv.Itoa(int(g.lastFPS)), "Hz ", strconv.Itoa(int(mem.HeapIdle/1024)), "k/", g.totalRAM, "k")
-
 	// TODO temp hack
 	_ = g.menuText.SetLine(1, strconv.Itoa(int(g.boopDist)), " ", strconv.Itoa(int(g.aX)), " ", strconv.Itoa(int(g.aY)), " ", strconv.Itoa(int(g.aZ)))
-	_ = g.menuText.SetY(2)
-	// _ = g.menuText.Println("TODO: more stuff, like at least indicating what states are being displayed outside")
+
+	// println(time.Now().Format("03:04"), g.lastFPS, "Hz", mem.HeapIdle/1024, "k/", g.totalRAM)
 }
 
-func (g *Gotogen) updateStatus(redraw bool) {
+func (g *Gotogen) updateStatus(updateIdleStatus bool) {
 	switch g.menuState {
 	case statusStateBoot:
 		if time.Now().After(g.menuStateChange.Add(menuTimeout)) {
@@ -304,7 +321,7 @@ func (g *Gotogen) updateStatus(redraw bool) {
 			break
 		}
 
-		if redraw {
+		if updateIdleStatus {
 			g.drawIdleStatus()
 		}
 	case statusStateMenu:
@@ -383,34 +400,38 @@ func (g *Gotogen) updateStatus(redraw bool) {
 	}
 }
 
+func (g *Gotogen) clearStatusScreen() {
+	// clear text buffer
+	g.menuText.Clear()
+	// but make sure we clear the *entire* screen, including pixels outside the coverage of the text buffer
+	w, h := g.menuDisplay.Size()
+	for x := int16(0); x < w; x++ {
+		for y := int16(0); y < h; y++ {
+			g.menuDisplay.SetPixel(x, y, color.RGBA{})
+		}
+	}
+	_ = g.menuDisplay.Display()
+}
+
 func (g *Gotogen) changeStatusState(state statusState) {
+	println("changing to status state", state.String())
+	g.activeMenu = nil
+	g.menuState = state
+	g.menuStateChange = time.Now()
+	g.clearStatusScreen()
+
 	switch state {
 	case statusStateIdle:
-		g.activeMenu = nil
-		g.menuStateChange = time.Now()
-		g.menuText.Clear()
 		g.drawIdleStatus()
 	case statusStateBlank:
-		g.activeMenu = nil
-		// clear text buffer
-		g.menuText.Clear()
-		// but make sure we clear the *entire* screen, including pixels outside the coverage of the text buffer
-		w, h := g.menuDisplay.Size()
-		for x := int16(0); x < w; x++ {
-			for y := int16(0); y < h; y++ {
-				g.menuDisplay.SetPixel(x, y, color.RGBA{})
-			}
-		}
-		// since it won't be drawn in the main loop
-		_ = g.menuDisplay.Display()
+		// nothing special to do
 	case statusStateMenu:
+		// hardware submenu is required to be the first item in the menu
 		m := g.rootMenu.Items[0].(*Menu)
 		m.Items = g.driver.MenuItems()
 		g.activeMenu = &g.rootMenu
 		g.rootMenu.Render(g.menuText)
 	}
-	g.menuState = state
-	g.menuStateChange = time.Now()
 }
 
 // unfortunately you can't recover runtime panics in tinygo, so this is just going to be used for things we detect
@@ -442,27 +463,52 @@ func (g *Gotogen) statusOff() {
 	}
 }
 
-func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16, drawMenu bool) {
+func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16, drawStatusMirror bool) {
+	drawStatusMirror = drawStatusMirror && g.menuDisplay.CanUpdateNow() && g.menuState == statusStateIdle
+	// drawStatusMirror = drawStatusMirror && g.menuState == statusStateIdle
+
+	w, h := g.faceMirror.Size()
 	b := img.Bounds()
 	for x := b.Min.X; x < b.Max.X; x++ {
-		xx := (64 - int16(x) + offX) % 64
+		xx := (w - int16(x) + offX) % w
 		for y := b.Min.Y; y < b.Max.Y; y++ {
 			r, gr, b, a := img.At(x, y).RGBA()
-			// FIXME remove hardcoded dimensions and origin flip
-			g.faceMirror.SetPixel(xx, (int16(y)+offY)%32, color.RGBA{uint8(r), uint8(gr), uint8(b), uint8(a)})
+			g.faceMirror.SetPixel(xx, (int16(y)+offY)%h, color.RGBA{R: uint8(r), G: uint8(gr), B: uint8(b), A: uint8(a)})
 
-			if drawMenu {
-				// mirror to menu
-				// RGBA returns each channel |= itself << 8 for whatever reason
-				r &= 0xFF
-				if r < 0xA0 {
-					r = 0
-				}
-				// FIXME remove hardcoded dimensions
-				g.menuMirror.SetPixel(xx, 32+(int16(y)+offY)%32, color.RGBA{uint8(r), 0, 0, 1})
+			if drawStatusMirror {
+				g.downmixForStatus(xx, int16(y)+offY, h, uint8(r), uint8(gr), uint8(b))
 			}
 		}
 	}
+}
+
+func (g *Gotogen) downmixForStatus(x, y int16, h int16, r, gr, b uint8) {
+	// RGBA returns each channel |= itself << 8 for whatever reason
+	switch g.menuMirrorDownmixChannel {
+	case red:
+		r &= 0xFF
+		if r < g.menuMirrorDownmixCutoff {
+			r = 0
+		}
+		gr = 0
+		b = 0
+	case green:
+		gr &= 0xFF
+		if gr < g.menuMirrorDownmixCutoff {
+			gr = 0
+		}
+		r = 0
+		b = 0
+	case blue:
+		b &= 0xFF
+		if b < g.menuMirrorDownmixCutoff {
+			b = 0
+		}
+		r = 0
+		gr = 0
+	}
+	// FIXME remove hardcoded offset
+	g.menuMirror.SetPixel(x, 32+y%h, color.RGBA{R: r, G: gr, B: b, A: 1})
 }
 
 func (g *Gotogen) initMainMenu() {
@@ -477,76 +523,43 @@ func (g *Gotogen) initMainMenu() {
 				Name:   "Blank status screen",
 				Invoke: func() { g.changeStatusState(statusStateBlank) },
 			},
-			&Menu{
-				Name: "Submenu 1",
-				Items: []Item{
-					&Menu{
-						Name: "Sub-submenu 1",
-						Items: []Item{
-							&ActionItem{
-								Name:   "sub-submenu 1 action 1",
-								Invoke: func() { println("action pressed") },
-							},
-							&ActionItem{
-								Name:   "sub-submenu 1 action 2",
-								Invoke: func() { println("action pressed") },
-							},
-							&SettingItem{
-								Name:  "sub-submenu 1 setting 1",
-								Apply: func(uint8) { println("setting saved") },
-							},
-						},
-					},
-					&ActionItem{
-						Name:   "submenu 1 action 1",
-						Invoke: func() { println("action pressed") },
-					},
-				},
-			},
-			&Menu{
-				Name: "Submenu 2",
-				Items: []Item{
-					&SettingItem{
-						Name: "submenu 2 setting 1",
-					},
-					&SettingItem{
-						Name: "submenu 2 setting 2",
-					},
-				},
-			},
-			&ActionItem{
-				Name:   "Action 1",
-				Invoke: func() { println("action pressed") },
+			&SettingItem{
+				Name:    "Status mirror skip",
+				Options: []string{"0", "1", "2", "4", "8", "16"},
+				Active:  3, // TODO load from setting storage
+				Apply:   g.setMenuMirrorSkip,
 			},
 			&SettingItem{
-				Name:    "Setting 1",
-				Active:  1,
-				Default: 1,
-				Options: []string{"A", "B", "C", "D", "E", "F", "G", "H"},
-				Apply:   func(s uint8) { println("setting saved " + strconv.Itoa(int(s))) },
+				Name:    "Status mirror color",
+				Options: []string{"red", "green", "blue"},
+				Active:  0,
+				Apply:   g.setMenuMirrorColor,
 			},
 			&SettingItem{
-				Name:  "Setting 2",
-				Apply: func(uint8) { println("setting saved") },
-			},
-			&SettingItem{
-				Name:  "Setting 3",
-				Apply: func(uint8) { println("setting saved") },
-			},
-			&SettingItem{
-				Name:  "Setting 4",
-				Apply: func(uint8) { println("setting saved") },
-			},
-			&SettingItem{
-				Name:  "Setting 5",
-				Apply: func(uint8) { println("setting saved") },
-			},
-			&SettingItem{
-				Name:  "Setting 6",
-				Apply: func(uint8) { println("setting saved") },
+				Name:    "Status mirror cutoff",
+				Options: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "D", "E", "F"},
+				Active:  9,
+				Apply:   g.setMenuMirrorCutoff,
 			},
 		},
 	}
+}
+
+func (g *Gotogen) setMenuMirrorCutoff(selected uint8) {
+	g.menuMirrorDownmixCutoff = (selected + 1) << 4
+}
+
+func (g *Gotogen) setMenuMirrorColor(selected uint8) {
+	g.menuMirrorDownmixChannel = colorChannel(selected)
+}
+
+func (g *Gotogen) setMenuMirrorSkip(selected uint8) {
+	if selected == 0 {
+		g.menuMirrorSkip = 0
+	} else {
+		g.menuMirrorSkip = 1 << (selected - 1)
+	}
+	println("setting menu mirror skip to", g.menuMirrorSkip)
 }
 
 func (g *Gotogen) Busy(f func(buffer *textbuf.Buffer)) {
@@ -572,6 +585,8 @@ func (g *Gotogen) Busy(f func(buffer *textbuf.Buffer)) {
 }
 
 func (g *Gotogen) busy() error {
+	g.faceState = faceStateBusy
+
 	busy, err := media.LoadImage(media.TypeFull, "wait")
 	if err != nil {
 		return errors.New("load busy: " + err.Error())

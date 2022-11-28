@@ -6,15 +6,19 @@ import (
 	"tinygo.org/x/drivers"
 )
 
+type Display interface {
+	drivers.Displayer
+
+	CanUpdateNow() bool
+}
+
 type Mirror struct {
-	d     drivers.Displayer
+	d     Display
 	realW int16
 	w, h  int16
 }
 
-var _ drivers.Displayer = (*Mirror)(nil)
-
-func New(d drivers.Displayer) Mirror {
+func New(d Display) Mirror {
 	w, h := d.Size()
 	return Mirror{
 		d:     d,
@@ -35,4 +39,8 @@ func (m Mirror) SetPixel(x, y int16, c color.RGBA) {
 
 func (m Mirror) Display() error {
 	return m.d.Display()
+}
+
+func (m Mirror) CanUpdateNow() bool {
+	return m.d.CanUpdateNow()
 }
