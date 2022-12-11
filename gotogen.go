@@ -2,7 +2,6 @@ package gotogen
 
 import (
 	"errors"
-	"image"
 	"image/color"
 	"runtime"
 	"strconv"
@@ -10,7 +9,10 @@ import (
 
 	"github.com/ajanata/textbuf"
 
-	"github.com/ajanata/gotogen/internal/media"
+	"github.com/ajanata/gotogen/internal/animation"
+	"github.com/ajanata/gotogen/internal/animation/face"
+	"github.com/ajanata/gotogen/internal/animation/peek"
+	"github.com/ajanata/gotogen/internal/animation/static"
 	"github.com/ajanata/gotogen/internal/mirror"
 )
 
@@ -37,17 +39,19 @@ type Gotogen struct {
 	faceDisplay Display
 	faceMirror  Display
 	faceState   faceState
+	activeAnim  animation.Animation
 
-	statusDisplay              Display
-	statusMirror               Display
-	statusText                 *textbuf.Buffer // TODO interface
-	statusState                statusState
-	statusStateChange          time.Time
-	statusMirrorSkip           uint8
-	statusMirrorDownmixChannel colorChannel
-	statusMirrorDownmixCutoff  uint8
-	rootMenu                   Menu
-	activeMenu                 Menuable
+	statusDisplay        Display
+	statusMirror         Display
+	statusFrameSkip      uint8
+	statusDownmixChannel colorChannel
+	statusDownmixCutoff  uint8
+	statusText           *textbuf.Buffer // TODO interface
+	statusState          statusState
+	statusStateChange    time.Time
+	rootMenu             Menu
+	activeMenu           Menuable
+	statusForceUpdate    bool
 
 	driver Driver
 
@@ -92,7 +96,7 @@ type Driver interface {
 	BoopDistance() (uint8, SensorStatus)
 
 	// Accelerometer is a normalized value for accelerometer values. TODO define the scale of the normalized values
-	// When not in motion, all values should be approximately zero.
+	// When not in motion, all values should be approximately zero. TODO actually implement that
 	// Drivers should provide a calibration option to zero out the sensor.
 	// The second return value indicates the status of the accelerometer: does not exist, valid data, or busy.
 	Accelerometer() (x, y, z int32, status SensorStatus)
@@ -140,8 +144,10 @@ func (g *Gotogen) Init() error {
 	}
 	g.statusText.AutoFlush = true
 
-	w, h := g.statusText.Size()
-	if w < 20 || h < 8 {
+	w, h := g.statusDisplay.Size()
+	tw, th := g.statusText.Size()
+	// TODO make this more graceful
+	if tw < 20 || th < 8 || w < 128 || h < 64 {
 		return errors.New("unusably small status display")
 	}
 
@@ -183,17 +189,25 @@ func (g *Gotogen) Init() error {
 	g.driver.LateInit(g.statusText)
 	g.initMainMenu()
 
-	_ = g.statusText.Println("The time is now")
+	_ = g.statusText.Print("Loading face")
+	f, err = face.New()
+	if err != nil {
+		_ = g.statusText.PrintlnInverse(": " + err.Error())
+		return errors.New("load face: " + err.Error())
+	}
+
+	_ = g.statusText.Println(".\nThe time is now")
 	_ = g.statusText.Println(time.Now().Format(time.Stamp))
 	_ = g.statusText.Println("Booted in " + time.Now().Sub(g.start).Round(100*time.Millisecond).String())
 	_ = g.statusText.Println("Gotogen online.")
 
+	// TODO load from settings storage; these is also defined in initMainMenu
+	g.statusDownmixChannel = colorChannelRed
+	g.statusDownmixCutoff = 0xA0
+	g.statusFrameSkip = 4
+
 	g.statusText.AutoFlush = false
 	g.statusStateChange = time.Now()
-
-	// TODO load from settings storage; this is also defined in initMainMenu
-	g.statusMirrorSkip = 4
-	g.statusMirrorDownmixCutoff = 0xA0
 
 	g.blink()
 	g.init = true
@@ -203,12 +217,17 @@ func (g *Gotogen) Init() error {
 
 // Run does not return. It attempts to run the main loop at the framerate specified in New.
 func (g *Gotogen) Run() {
+	// TODO begin temporary animation for performance testing
 	var err error
-	cant, err = media.LoadImage(media.TypeFull, "cant")
+	// s, err = slide.New("cant")
+	s, err = peek.New("watching")
 	if err != nil {
 		g.panic(err)
 	}
-	moveImg = true
+	g.faceState = faceStateAnimation
+	s.Activate(g)
+	g.activeAnim = s
+	// TODO end temporary animation for performance testing
 
 	for range time.Tick(g.frameTime) {
 		err := g.RunTick()
@@ -218,10 +237,8 @@ func (g *Gotogen) Run() {
 	}
 }
 
-var imgX int16
-
-var cant image.Image
-var moveImg bool
+var s animation.Animation
+var f *face.Anim
 
 // RunTick runs a single iteration of the main loop.
 func (g *Gotogen) RunTick() error {
@@ -231,10 +248,13 @@ func (g *Gotogen) RunTick() error {
 
 	g.blinkerOff()
 	g.tick++
+	g.statusForceUpdate = false
 
 	// busy states clear when we get back to the run loop
 	if g.faceState == faceStateBusy {
 		g.faceState = faceStateDefault
+		f.Activate(g)
+		g.activeAnim = f
 	}
 
 	if time.Since(g.lastSec) >= time.Second {
@@ -251,31 +271,24 @@ func (g *Gotogen) RunTick() error {
 
 	x, y, z, st := g.driver.Accelerometer()
 	if st == SensorStatusAvailable {
-		x /= 1000
-		y /= 1000
-		z /= 1000
 		g.aX, g.aY, g.aZ = x, y, z
 	}
 
 	// TODO better way to framerate limit the status screen
 	canRedrawStatus := g.statusDisplay.CanUpdateNow()
-	if g.statusMirrorSkip > 0 {
-		canRedrawStatus = canRedrawStatus && uint8(g.tick)%g.statusMirrorSkip == 0
+	if g.statusFrameSkip > 0 {
+		canRedrawStatus = canRedrawStatus && uint8(g.tick)%g.statusFrameSkip == 0
 	}
 	// we always need to call this tho since the menu handling code is in here
 	g.updateStatus(canRedrawStatus)
 
-	// TODO begin temporary animation for performance testing
-
-	if moveImg {
-		g.SetFullFace(cant, imgX, 0, canRedrawStatus)
-		imgX++
-		if imgX == 64 {
-			imgX = 0
-		}
+	cont := g.activeAnim.DrawFrame(g, g.tick)
+	if !cont {
+		g.faceState = faceStateDefault
+		g.statusForceUpdate = true
+		f.Activate(g)
+		g.activeAnim = f
 	}
-
-	// TODO end temporary animation for performance testing
 
 	err := g.faceDisplay.Display()
 	if err != nil {
@@ -463,53 +476,6 @@ func (g *Gotogen) blinkerOff() {
 	}
 }
 
-func (g *Gotogen) SetFullFace(img image.Image, offX, offY int16, drawStatusMirror bool) {
-	drawStatusMirror = drawStatusMirror && g.statusDisplay.CanUpdateNow() && g.statusState == statusStateIdle
-
-	w, h := g.faceMirror.Size()
-	b := img.Bounds()
-	for x := b.Min.X; x < b.Max.X; x++ {
-		xx := (w - int16(x) + offX) % w
-		for y := b.Min.Y; y < b.Max.Y; y++ {
-			r, gr, b, a := img.At(x, y).RGBA()
-			g.faceMirror.SetPixel(xx, (int16(y)+offY)%h, color.RGBA{R: uint8(r), G: uint8(gr), B: uint8(b), A: uint8(a)})
-
-			if drawStatusMirror {
-				g.downmixForStatus(xx, int16(y)+offY, h, uint8(r), uint8(gr), uint8(b))
-			}
-		}
-	}
-}
-
-func (g *Gotogen) downmixForStatus(x, y int16, h int16, r, gr, b uint8) {
-	// RGBA returns each channel |= itself << 8 for whatever reason
-	switch g.statusMirrorDownmixChannel {
-	case red:
-		r &= 0xFF
-		if r < g.statusMirrorDownmixCutoff {
-			r = 0
-		}
-		gr = 0
-		b = 0
-	case green:
-		gr &= 0xFF
-		if gr < g.statusMirrorDownmixCutoff {
-			gr = 0
-		}
-		r = 0
-		b = 0
-	case blue:
-		b &= 0xFF
-		if b < g.statusMirrorDownmixCutoff {
-			b = 0
-		}
-		r = 0
-		gr = 0
-	}
-	// FIXME remove hardcoded offset
-	g.statusMirror.SetPixel(x, 32+y%h, color.RGBA{R: r, G: gr, B: b, A: 1})
-}
-
 func (g *Gotogen) initMainMenu() {
 	g.rootMenu = Menu{
 		Name: "GOTOGEN MENU",
@@ -523,40 +489,40 @@ func (g *Gotogen) initMainMenu() {
 				Invoke: func() { g.changeStatusState(statusStateBlank) },
 			},
 			&SettingItem{
-				Name:    "Status mirror skip",
+				Name:    "Status frame skip",
 				Options: []string{"0", "1", "2", "4", "8", "16"},
 				Active:  3, // TODO load from setting storage
-				Apply:   g.setStatusMirrorSkip,
+				Apply:   g.setStatusFrameSkip,
 			},
 			&SettingItem{
-				Name:    "Status mirror color",
-				Options: []string{"red", "green", "blue"},
-				Active:  0,
-				Apply:   g.setStatusMirrorColor,
+				Name:    "Status dupl. color",
+				Options: []string{"full", "red", "green", "blue"},
+				Active:  1,
+				Apply:   g.setStatusDuplicateColor,
 			},
 			&SettingItem{
-				Name:    "Status mirror cutoff",
+				Name:    "Status dupl. cutoff",
 				Options: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "D", "E", "F"},
 				Active:  9,
-				Apply:   g.setStatusMirrorCutoff,
+				Apply:   g.setStatusDuplicateCutoff,
 			},
 		},
 	}
 }
 
-func (g *Gotogen) setStatusMirrorCutoff(selected uint8) {
-	g.statusMirrorDownmixCutoff = (selected + 1) << 4
+func (g *Gotogen) setStatusDuplicateCutoff(selected uint8) {
+	g.statusDownmixCutoff = (selected + 1) << 4
 }
 
-func (g *Gotogen) setStatusMirrorColor(selected uint8) {
-	g.statusMirrorDownmixChannel = colorChannel(selected)
+func (g *Gotogen) setStatusDuplicateColor(selected uint8) {
+	g.statusDownmixChannel = colorChannel(selected)
 }
 
-func (g *Gotogen) setStatusMirrorSkip(selected uint8) {
+func (g *Gotogen) setStatusFrameSkip(selected uint8) {
 	if selected == 0 {
-		g.statusMirrorSkip = 0
+		g.statusFrameSkip = 0
 	} else {
-		g.statusMirrorSkip = 1 << (selected - 1)
+		g.statusFrameSkip = 1 << (selected - 1)
 	}
 }
 
@@ -585,11 +551,56 @@ func (g *Gotogen) Busy(f func(buffer *textbuf.Buffer)) {
 func (g *Gotogen) busy() error {
 	g.faceState = faceStateBusy
 
-	busy, err := media.LoadImage(media.TypeFull, "wait")
+	busy, err := static.New("wait")
 	if err != nil {
 		return errors.New("load busy: " + err.Error())
 	}
-	g.SetFullFace(busy, 0, 0, false)
+	busy.Activate(g.faceMirror)
 	_ = g.faceDisplay.Display()
+	g.activeAnim = busy
+
 	return nil
+}
+
+func (g *Gotogen) Size() (x, y int16) {
+	return g.faceMirror.Size()
+}
+
+func (g *Gotogen) Display() error {
+	// nothing to do here, refreshing the real displays is managed elsewhere
+	return nil
+}
+
+func (g *Gotogen) SetPixel(x, y int16, c color.RGBA) {
+	g.faceMirror.SetPixel(x, y, c)
+	if g.statusForceUpdate || (g.statusState == statusStateIdle && (g.statusFrameSkip == 0 || uint8(g.tick)%g.statusFrameSkip == 0 && g.statusDisplay.CanUpdateNow())) {
+		switch g.statusDownmixChannel {
+		case colorChannelRed:
+			if c.R < g.statusDownmixCutoff {
+				c.R = 0
+			} else {
+				c.R = 0xFF
+			}
+			c.G = 0
+			c.B = 0
+		case colorChannelGreen:
+			if c.G < g.statusDownmixCutoff {
+				c.G = 0
+			} else {
+				c.G = 0xFF
+			}
+			c.R = 0
+			c.B = 0
+		case colorChannelBlue:
+			if c.B < g.statusDownmixCutoff {
+				c.B = 0
+			} else {
+				c.B = 0xFF
+			}
+			c.R = 0
+			c.G = 0
+		}
+		// TODO remove hardcoded offset
+		g.statusMirror.SetPixel(x, y+32, c)
+	}
 }

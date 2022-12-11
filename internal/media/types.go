@@ -3,20 +3,20 @@ package media
 type Type string
 
 const (
-	TypeEyes  Type = "eyes"
+	TypeEye   Type = "eye"
 	TypeMouth Type = "mouth"
 	TypeNose  Type = "nose"
 	TypeFull  Type = "full"
 )
 
-func (t Type) size() (w int, h int) {
+func (t Type) Size() (w int16, h int16) {
 	switch t {
-	case TypeEyes:
-		return 16, 16
+	case TypeEye:
+		return 24, 12
 	case TypeNose:
-		return 8, 8
+		return 12, 12
 	case TypeMouth:
-		return 64, 16
+		return 48, 18
 	case TypeFull:
 		return 64, 32
 	default:

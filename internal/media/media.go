@@ -27,7 +27,7 @@ func LoadImage(typ Type, name string) (image.Image, error) {
 		return nil, errors.New("cannot open directory")
 	}
 
-	w, h := typ.size()
+	w, h := typ.Size()
 	if w == 0 || h == 0 {
 		return nil, errors.New("invalid media type")
 	}
@@ -38,7 +38,7 @@ func LoadImage(typ Type, name string) (image.Image, error) {
 	}
 
 	b := img.Bounds()
-	iw, ih := b.Max.X-b.Min.X, b.Max.Y-b.Min.Y
+	iw, ih := int16(b.Max.X-b.Min.X), int16(b.Max.Y-b.Min.Y)
 	if w != iw || h != ih {
 		return nil, errors.New("invalid image size for type " + string(typ))
 	}

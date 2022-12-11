@@ -94,7 +94,8 @@ func (s faceState) String() string {
 type colorChannel uint8
 
 const (
-	red colorChannel = iota
-	green
-	blue
+	colorChannelNone colorChannel = iota
+	colorChannelRed
+	colorChannelGreen
+	colorChannelBlue
 )
