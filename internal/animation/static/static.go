@@ -13,7 +13,7 @@ type Anim struct {
 	img image.Image
 }
 
-func New(file string) (*Anim, error) {
+func New(file string) (animation.Animation, error) {
 	img, err := media.LoadImage(media.TypeFull, file)
 	if err != nil {
 		return nil, err

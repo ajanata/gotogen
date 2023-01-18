@@ -12,7 +12,9 @@ import (
 	"github.com/ajanata/gotogen/internal/animation"
 	"github.com/ajanata/gotogen/internal/animation/face"
 	"github.com/ajanata/gotogen/internal/animation/peek"
+	"github.com/ajanata/gotogen/internal/animation/slide"
 	"github.com/ajanata/gotogen/internal/animation/static"
+	"github.com/ajanata/gotogen/internal/media"
 	"github.com/ajanata/gotogen/internal/mirror"
 )
 
@@ -100,6 +102,9 @@ type Driver interface {
 	// Drivers should provide a calibration option to zero out the sensor.
 	// The second return value indicates the status of the accelerometer: does not exist, valid data, or busy.
 	Accelerometer() (x, y, z int32, status SensorStatus)
+
+	// Talking indicates if the driver has detected speech and the face should animate talking.
+	Talking() bool
 }
 
 type Blinker interface {
@@ -190,7 +195,7 @@ func (g *Gotogen) Init() error {
 	g.initMainMenu()
 
 	_ = g.statusText.Print("Loading face")
-	f, err = face.New()
+	f, err = face.New(g)
 	if err != nil {
 		_ = g.statusText.PrintlnInverse(": " + err.Error())
 		return errors.New("load face: " + err.Error())
@@ -217,18 +222,6 @@ func (g *Gotogen) Init() error {
 
 // Run does not return. It attempts to run the main loop at the framerate specified in New.
 func (g *Gotogen) Run() {
-	// TODO begin temporary animation for performance testing
-	var err error
-	// s, err = slide.New("cant")
-	s, err = peek.New("watching")
-	if err != nil {
-		g.panic(err)
-	}
-	g.faceState = faceStateAnimation
-	s.Activate(g)
-	g.activeAnim = s
-	// TODO end temporary animation for performance testing
-
 	for range time.Tick(g.frameTime) {
 		err := g.RunTick()
 		if err != nil {
@@ -329,13 +322,21 @@ func (g *Gotogen) updateStatus(updateIdleStatus bool) {
 			g.changeStatusState(statusStateIdle)
 		}
 	case statusStateIdle:
-		if g.driver.PressedButton() == MenuButtonMenu {
+		but := g.driver.PressedButton()
+		switch but {
+		case MenuButtonBack:
+			if g.faceState != faceStateDefault {
+				g.faceState = faceStateDefault
+				g.statusForceUpdate = true
+				f.Activate(g)
+				g.activeAnim = f
+			}
+		case MenuButtonMenu:
 			g.changeStatusState(statusStateMenu)
-			break
-		}
-
-		if updateIdleStatus {
-			g.drawIdleStatus()
+		default:
+			if updateIdleStatus {
+				g.drawIdleStatus()
+			}
 		}
 	case statusStateMenu:
 		if time.Now().After(g.statusStateChange.Add(menuTimeout)) {
@@ -447,6 +448,12 @@ func (g *Gotogen) changeStatusState(state statusState) {
 	}
 }
 
+func (g *Gotogen) startAnimation(a animation.Animation) {
+	g.faceState = faceStateAnimation
+	a.Activate(g)
+	g.activeAnim = a
+}
+
 // unfortunately you can't recover runtime panics in tinygo, so this is just going to be used for things we detect
 // that are fatal
 func (g *Gotogen) panic(v any) {
@@ -476,7 +483,42 @@ func (g *Gotogen) blinkerOff() {
 	}
 }
 
+func (g *Gotogen) newAnimation(file string, f func(string) (animation.Animation, error)) {
+	a, err := f(file)
+	if err != nil {
+		g.panic(err)
+	}
+	g.startAnimation(a)
+	// TODO exit the menu?
+}
+
 func (g *Gotogen) initMainMenu() {
+	imgs, err := media.Enumerate(media.TypeFull)
+	if err != nil {
+		g.panic("enumerating images for animations: " + err.Error())
+	}
+	var anims []Item
+	for _, i := range imgs {
+		f := i
+		anims = append(anims, &Menu{
+			Name: i,
+			Items: []Item{
+				&ActionItem{
+					Name:   "Static",
+					Invoke: func() { g.newAnimation(f, static.New) },
+				},
+				&ActionItem{
+					Name:   "Slide",
+					Invoke: func() { g.newAnimation(f, slide.New) },
+				},
+				&ActionItem{
+					Name:   "Peek",
+					Invoke: func() { g.newAnimation(f, peek.New) },
+				},
+			},
+		})
+	}
+
 	g.rootMenu = Menu{
 		Name: "GOTOGEN MENU",
 		Items: []Item{
@@ -484,27 +526,36 @@ func (g *Gotogen) initMainMenu() {
 			&Menu{
 				Name: "Hardware Settings",
 			},
-			&ActionItem{
-				Name:   "Blank status screen",
-				Invoke: func() { g.changeStatusState(statusStateBlank) },
+			&Menu{
+				Name:  "Full-screen anims.",
+				Items: anims,
 			},
-			&SettingItem{
-				Name:    "Status frame skip",
-				Options: []string{"0", "1", "2", "4", "8", "16"},
-				Active:  3, // TODO load from setting storage
-				Apply:   g.setStatusFrameSkip,
-			},
-			&SettingItem{
-				Name:    "Status dupl. color",
-				Options: []string{"full", "red", "green", "blue"},
-				Active:  1,
-				Apply:   g.setStatusDuplicateColor,
-			},
-			&SettingItem{
-				Name:    "Status dupl. cutoff",
-				Options: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "D", "E", "F"},
-				Active:  9,
-				Apply:   g.setStatusDuplicateCutoff,
+			&Menu{
+				Name: "Internal screen",
+				Items: []Item{
+					&ActionItem{
+						Name:   "Blank screen",
+						Invoke: func() { g.changeStatusState(statusStateBlank) },
+					},
+					&SettingItem{
+						Name:    "Frame skip",
+						Options: []string{"0", "1", "2", "4", "8", "16"},
+						Active:  3, // TODO load from setting storage
+						Apply:   g.setStatusFrameSkip,
+					},
+					&SettingItem{
+						Name:    "Face dupl. color",
+						Options: []string{"full", "red", "green", "blue"},
+						Active:  1,
+						Apply:   g.setStatusDuplicateColor,
+					},
+					&SettingItem{
+						Name:    "Face dupl. cutoff",
+						Options: []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "A", "B", "D", "E", "F"},
+						Active:  9,
+						Apply:   g.setStatusDuplicateCutoff,
+					},
+				},
 			},
 		},
 	}
@@ -603,4 +654,8 @@ func (g *Gotogen) SetPixel(x, y int16, c color.RGBA) {
 		// TODO remove hardcoded offset
 		g.statusMirror.SetPixel(x, y+32, c)
 	}
+}
+
+func (g *Gotogen) Talking() bool {
+	return g.driver.Talking()
 }

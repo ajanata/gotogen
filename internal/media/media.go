@@ -4,6 +4,7 @@ import (
 	"embed"
 	"errors"
 	"image"
+	"strings"
 
 	"golang.org/x/image/bmp"
 )
@@ -44,4 +45,20 @@ func LoadImage(typ Type, name string) (image.Image, error) {
 	}
 
 	return img, nil
+}
+
+func Enumerate(typ Type) ([]string, error) {
+	dir, err := imgs.ReadDir("media/" + string(typ))
+	if err != nil {
+		return nil, err
+	}
+
+	var names []string
+	for _, f := range dir {
+		if !f.IsDir() {
+			names = append(names, strings.TrimSuffix(f.Name(), ".bmp"))
+		}
+	}
+
+	return names, nil
 }

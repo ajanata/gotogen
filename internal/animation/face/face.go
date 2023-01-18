@@ -3,6 +3,7 @@ package face
 import (
 	"image"
 	"image/color"
+	"strconv"
 
 	"tinygo.org/x/drivers"
 
@@ -10,13 +11,19 @@ import (
 	"github.com/ajanata/gotogen/internal/media"
 )
 
-type Anim struct {
-	eye   image.Image
-	nose  image.Image
-	mouth image.Image
+// TODO more
+type Sensors interface {
+	Talking() bool
 }
 
-func New() (*Anim, error) {
+type Anim struct {
+	eye     image.Image
+	nose    image.Image
+	mouth   image.Image
+	sensors Sensors
+}
+
+func New(sensors Sensors) (*Anim, error) {
 	eye, err := media.LoadImage(media.TypeEye, "default")
 	if err != nil {
 		return nil, err
@@ -31,9 +38,10 @@ func New() (*Anim, error) {
 	}
 
 	return &Anim{
-		eye:   eye,
-		nose:  nose,
-		mouth: mouth,
+		eye:     eye,
+		nose:    nose,
+		mouth:   mouth,
+		sensors: sensors,
 	}, nil
 }
 
@@ -46,13 +54,21 @@ func (a *Anim) Activate(disp drivers.Displayer) {
 	}
 }
 
-func (a *Anim) DrawFrame(disp drivers.Displayer, _ uint32) bool {
+func (a *Anim) DrawFrame(disp drivers.Displayer, tick uint32) bool {
 	w, h := disp.Size()
 	// TODO jitter or something, will need other sensors. the face is allowed to be special-cased for those
 	animation.DrawImage(disp, 0, 0, a.eye, false)
 	nw, _ := media.TypeNose.Size()
 	animation.DrawImage(disp, w-nw, 8, a.nose, false)
 	_, mh := media.TypeMouth.Size()
-	animation.DrawImage(disp, 3, h-mh-1, a.mouth, false)
+	// TODO better animation
+	if a.sensors.Talking() {
+		i, err := media.LoadImage(media.TypeMouth, "talk_"+strconv.Itoa(int(tick%4)))
+		if err == nil {
+			animation.DrawImage(disp, 3, h-mh-1, i, false)
+		}
+	} else {
+		animation.DrawImage(disp, 3, h-mh-1, a.mouth, false)
+	}
 	return true
 }

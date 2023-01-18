@@ -18,7 +18,7 @@ type Anim struct {
 	moveUp bool
 }
 
-func New(file string) (*Anim, error) {
+func New(file string) (animation.Animation, error) {
 	img, err := media.LoadImage(media.TypeFull, file)
 	if err != nil {
 		return nil, err
@@ -43,15 +43,17 @@ func (a *Anim) Activate(disp drivers.Displayer) {
 	}
 }
 
-func (a *Anim) DrawFrame(disp drivers.Displayer, tick uint32) bool {
+func (a *Anim) DrawFrame(disp drivers.Displayer, _ uint32) bool {
 	if time.Now().Before(a.next) {
 		return true
 	}
 	if a.moveUp {
 		// blank the row we're moving up from
 		y := a.y + int16(a.img.Bounds().Max.Y) - 1
-		for x := int16(0); x < int16(a.img.Bounds().Max.X); x++ {
-			disp.SetPixel(x, y, color.RGBA{})
+		if y >= 0 {
+			for x := int16(0); x < int16(a.img.Bounds().Max.X); x++ {
+				disp.SetPixel(x, y, color.RGBA{})
+			}
 		}
 		a.y--
 	} else {
@@ -59,7 +61,7 @@ func (a *Anim) DrawFrame(disp drivers.Displayer, tick uint32) bool {
 	}
 	animation.DrawImage(disp, 0, a.y, a.img, false)
 	if a.y >= 0 {
-		a.next = time.Now().Add(5 * time.Second)
+		a.next = time.Now().Add(3 * time.Second)
 		a.moveUp = true
 	} else if a.y < int16(-a.img.Bounds().Max.Y) {
 		return false

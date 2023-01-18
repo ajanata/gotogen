@@ -4,6 +4,10 @@ import (
 	"github.com/ajanata/textbuf"
 )
 
+type MenuProvider interface {
+	GetMenu() Menu
+}
+
 type Item interface {
 	name() string
 }
@@ -120,8 +124,4 @@ func (si *SettingItem) Render(buf *textbuf.Buffer) {
 			_ = buf.SetLine(int16(i+1), prefix+item)
 		}
 	}
-}
-
-type MenuProvider interface {
-	GetMenu() Menu
 }

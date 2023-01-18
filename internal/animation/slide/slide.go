@@ -14,7 +14,7 @@ type Anim struct {
 	x   int16
 }
 
-func New(file string) (*Anim, error) {
+func New(file string) (animation.Animation, error) {
 	img, err := media.LoadImage(media.TypeFull, file)
 	if err != nil {
 		return nil, err
