@@ -105,6 +105,13 @@ type Driver interface {
 
 	// Talking indicates if the driver has detected speech and the face should animate talking.
 	Talking() bool
+
+	// StatusLine returns a textual status indicator that the driver may use for whatever it wishes.
+	//
+	// For the current hardware implementation of a 128x64 OLED display with the 6x8 font, this cannot be more than 21
+	// characters. Other hardware implementations may have different limits, but since the hardware implementation is
+	// what is returning this line, it should know better.
+	StatusLine() string
 }
 
 type Blinker interface {
@@ -209,7 +216,7 @@ func (g *Gotogen) Init() error {
 	// TODO load from settings storage; these is also defined in initMainMenu
 	g.statusDownmixChannel = colorChannelRed
 	g.statusDownmixCutoff = 0xA0
-	g.statusFrameSkip = 4
+	g.statusFrameSkip = 0
 
 	g.statusText.AutoFlush = false
 	g.statusStateChange = time.Now()
@@ -306,6 +313,8 @@ func (g *Gotogen) drawIdleStatus() {
 	_ = g.statusText.SetLine(0, time.Now().Format("03:04"), " ", strconv.Itoa(int(g.lastFPS)), "Hz ", strconv.Itoa(int(mem.HeapIdle/1024)), "k/", g.totalRAM, "k")
 	// TODO temp hack
 	_ = g.statusText.SetLine(1, strconv.Itoa(int(g.boopDist)), " ", strconv.Itoa(int(g.aX)), " ", strconv.Itoa(int(g.aY)), " ", strconv.Itoa(int(g.aZ)))
+
+	_ = g.statusText.SetLine(3, g.driver.StatusLine())
 
 	// println(time.Now().Format("03:04"), g.lastFPS, "Hz", mem.HeapIdle/1024, "k/", g.totalRAM)
 }
@@ -540,7 +549,7 @@ func (g *Gotogen) initMainMenu() {
 					&SettingItem{
 						Name:    "Frame skip",
 						Options: []string{"0", "1", "2", "4", "8", "16"},
-						Active:  3, // TODO load from setting storage
+						Active:  0, // TODO load from setting storage
 						Apply:   g.setStatusFrameSkip,
 					},
 					&SettingItem{
