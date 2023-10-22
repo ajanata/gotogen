@@ -57,18 +57,19 @@ func (a *Anim) Activate(disp drivers.Displayer) {
 func (a *Anim) DrawFrame(disp drivers.Displayer, tick uint32) bool {
 	w, h := disp.Size()
 	// TODO jitter or something, will need other sensors. the face is allowed to be special-cased for those
-	animation.DrawImage(disp, 0, 0, a.eye, false)
+	animation.DrawImage(disp, 10, 0, a.eye, false)
 	nw, _ := media.TypeNose.Size()
 	animation.DrawImage(disp, w-nw, 8, a.nose, false)
 	_, mh := media.TypeMouth.Size()
 	// TODO better animation
 	if a.sensors.Talking() {
+		// reduce width by 13
 		i, err := media.LoadImage(media.TypeMouth, "talk_"+strconv.Itoa(int(tick%4)))
 		if err == nil {
-			animation.DrawImage(disp, 3, h-mh-1, i, false)
+			animation.DrawImage(disp, 13, h-mh-1, i, false)
 		}
 	} else {
-		animation.DrawImage(disp, 3, h-mh-1, a.mouth, false)
+		animation.DrawImage(disp, 13, h-mh-1, a.mouth, false)
 	}
 	return true
 }
